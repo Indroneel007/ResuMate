@@ -1,5 +1,5 @@
 {
-  "name": "client",
+  "name": "user",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,11 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@descope/react-sdk": "^2.18.2",
+    "@descope/nextjs-sdk": "^0.14.12",
     "next": "15.5.0",
     "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "socket.io-client": "^4.8.1"
+    "react-dom": "19.1.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
