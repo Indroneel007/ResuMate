@@ -3,8 +3,42 @@ import fetch from "node-fetch";
 import { ChatOpenAI } from "@langchain/openai";
 import { Tool } from "@langchain/core/tools";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
+import brevo from "@getbrevo/brevo";
+import { HumanMessage } from "@langchain/core/messages";
+import {path} from "path";
+import {fs} from "fs";
 
 const router = express.Router();
+
+let defaultClient = brevo.ApiClient.instance;
+let apiKey = defaultClient.authentications['api-key'];
+apiKey.apiKey = process.env.BREVO_API_KEY;
+let apiInstance = new brevo.TransactionalEmailsApi();
+let sendSmtpEmail = new brevo.SendSmtpEmail();
+
+function requireAuth(requiredScopes){
+  return async (req, res, next) => {
+    try {
+      const auth = req.headers.authorization || '';
+      const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+      if (!token) return res.status(401).json({ error: 'Missing bearer token' });
+
+      // Validate access or session token
+      const { token: claims } = await descope.validateSession(token);
+
+      // Scopes are space-separated in the "scope" claim (OAuth convention)
+      const scopes = (claims?.scope || '').split(' ').filter(Boolean);
+      const ok = requiredScopes.every(s => scopes.includes(s));
+      if (!ok) return res.status(403).json({ error: 'Insufficient scope' });
+
+      req.user = claims; // sub, email, roles, scope, etc.
+      next();
+    } catch {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+  };
+}
+
 
 // Tool: Query Brave Search
 const fundedStartupsTool = new Tool({
@@ -88,13 +122,39 @@ async function fetchCompanyEmails(domain) {
   }
 }
 
-router.get("/recent-companies", async (req, res) => {
+router.post("/upload", requireAuth(['access:agentA']), async(req, res)=>{
+  try{
+    const filePath = path.join(__dirname, "..", req.file.path);
+
+    const response = await llm.invoke([
+      new HumanMessage({
+        content: [
+          {
+            type: "input_text",
+            text: "Summarize this resume in 5 bullet points highlighting experience & skills.",
+          },
+          { type: "input_file", file_data: { path: filePath } },
+        ],
+      }),
+    ]);
+
+    fs.unlinkSync(filePath);
+
+    res.json({ summary: response.content[0].text });
+  }catch(e){
+    console.error(e);
+    res.status(500).json({ error: 'Failed to curate resume' });
+  }
+})
+
+let startups;
+
+router.get("/recent-companies", requireAuth(['access:agentB']), async (req, res) => {
   try {
     const response = await agent.invoke({
         input: "Fetch recently funded startups of this month with their description and domains in JSON format"
     });
 
-    let startups;
     try{
         startups = JSON.parse(response.output);
     } catch (err) {
@@ -109,10 +169,20 @@ router.get("/recent-companies", async (req, res) => {
       })
     );
 
-    res.json(enriched);
-    
+    return res.status(200).json(enriched);
+
   } catch (err) {
     console.error("Agent B error:", err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 });
+
+router.post('/email', requireAuth(['access:agentB']), async(req, res)=>{
+  try{
+
+  }catch(e){
+
+  }
+})
+
+export default router;

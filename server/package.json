@@ -10,6 +10,7 @@
   "license": "ISC",
   "dependencies": {
     "@descope/node-sdk": "^1.7.13",
+    "@getbrevo/brevo": "^3.0.1",
     "@langchain/core": "^0.3.72",
     "@langchain/langgraph": "^0.4.6",
     "@langchain/openai": "^0.6.9",
