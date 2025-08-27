@@ -10,11 +10,11 @@ import {fs} from "fs";
 
 const router = express.Router();
 
-let defaultClient = brevo.ApiClient.instance;
-let apiKey = defaultClient.authentications['api-key'];
-apiKey.apiKey = process.env.BREVO_API_KEY;
-let apiInstance = new brevo.TransactionalEmailsApi();
-let sendSmtpEmail = new brevo.SendSmtpEmail();
+const brevoClient = new Brevo.TransactionalEmailsApi();
+brevoClient.setApiKey(
+  Brevo.TransactionalEmailsApiApiKeys.apiKey,
+  process.env.BREVO_API_KEY
+);
 
 function requireAuth(requiredScopes){
   return async (req, res, next) => {
@@ -40,7 +40,7 @@ function requireAuth(requiredScopes){
 }
 
 
-// Tool: Query Brave Search
+// --------------------- Fetch Recently Funded Startups Tool --------------------
 const fundedStartupsTool = new Tool({
   name: "fetch_funded_startups",
   description: "Fetch recently funded startups of the current month with their description and domain",
@@ -76,15 +76,38 @@ const fundedStartupsTool = new Tool({
   },
 });
 
+// --------------------- Resume Summarizer Tool --------------------
+const resumeSummarizerTool = new Tool({
+  name: "resume_summarizer",
+  description: "Summarize resumes into 5 bullet points highlighting experience & skills",
+  func: async (filePath) => {
+    const response = await llm.invoke([
+      new HumanMessage({
+        content: [
+          {
+            type: "input_text",
+            text: "Summarize this resume in 5 bullet points highlighting experience & skills.",
+          },
+          { type: "input_file", file_data: { path: filePath } },
+        ],
+      }),
+    ]);
+
+    fs.unlinkSync(filePath);
+    return response.content[0].text;
+  },
+});
+
 const llm = new ChatOpenAI({
   openAIApiKey: process.env.OPENAI_API_KEY,
   model: "gpt-oss-20b:free",
   temperature: 0.7,
 });
 
-const agent = createReactAgent({
+const agentA = createReactAgent({
   llm: llm,
-  tools: [fundedStartupsTool],
+  tools: [resumeSummarizerTool],
+  maxIterations: 3,
 });
 
 const buildTicketPrompt = (searchData) => `
@@ -96,7 +119,7 @@ Here is some web search data:
 ${searchData.map((r, i) => `${i+1}. ${r.title}`).join("\n")}
 Return exactly JSON.
 `;
-
+// -------------------- Fetch Company Emails --------------------
 async function fetchCompanyEmails(domain) {
   try {
     const url = `https://api.hunter.io/v2/domain-search?domain=${domain}&api_key=${process.env.HUNTER_API_KEY}`;
@@ -122,36 +145,75 @@ async function fetchCompanyEmails(domain) {
   }
 }
 
+// -------------------- Personalized Email Curator --------------------
+const emailCuratorTool = new Tool({
+  name: "email_curator",
+  description: "Generate a personalized email given resume summary, company name, and description",
+  func: async (input) => {
+    const { resumeSummary, companyName, recipientName } = JSON.parse(input);
+
+    const prompt = `
+      You are writing a professional cold email.
+      - Resume Summary: ${resumeSummary}
+      - Company: ${companyName}
+      - Recipient: ${recipientName}
+
+      Write a concise email introducing myself and aligning my skills with their company.
+      Use recipient's name and company name dynamically.
+    `;
+
+    const response = await llm.invoke(prompt);
+    return response.content[0].text;
+  },
+});
+
+// -------------------- Send Email --------------------
+const sendEmailTool = new Tool({
+  name: "send_email",
+  description: "Send emails to multiple recipients using Brevo",
+  func: async (input) => {
+    const { fromEmail, toEmail, subject, body } = JSON.parse(input);
+
+    const recipients = toEmail.map((email) => ({ email }));
+
+    const sendSmtpEmail = {
+      sender: { email: fromEmail}, // Must be verified in Brevo
+      to: recipients,
+      subject,
+      htmlContent: `<p>${body}</p>`,
+    };
+
+    const result = await brevoClient.sendTransacEmail(sendSmtpEmail);
+    return JSON.stringify({ success: true, messageId: result.messageId, recipients: toEmail });
+  },
+});
+
+const agentB = createReactAgent({
+  llm: llm,
+  tools: [fundedStartupsTool, emailCuratorTool, sendEmailTool],
+  maxIterations: 3,
+});
+
+let curated_resume;
+
 router.post("/upload", requireAuth(['access:agentA']), async(req, res)=>{
-  try{
+  try {
     const filePath = path.join(__dirname, "..", req.file.path);
+    const summary = await resumeSummarizerTool.func(filePath);
 
-    const response = await llm.invoke([
-      new HumanMessage({
-        content: [
-          {
-            type: "input_text",
-            text: "Summarize this resume in 5 bullet points highlighting experience & skills.",
-          },
-          { type: "input_file", file_data: { path: filePath } },
-        ],
-      }),
-    ]);
-
-    fs.unlinkSync(filePath);
-
-    res.json({ summary: response.content[0].text });
-  }catch(e){
+    curated_resume = summary;
+    res.json({ summary });
+  } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'Failed to curate resume' });
+    res.status(500).json({ error: "Failed to summarize resume" });
   }
 })
 
-let startups;
+let startups = [];
 
 router.get("/recent-companies", requireAuth(['access:agentB']), async (req, res) => {
   try {
-    const response = await agent.invoke({
+    const response = await agentB.invoke({
         input: "Fetch recently funded startups of this month with their description and domains in JSON format"
     });
 
@@ -179,6 +241,14 @@ router.get("/recent-companies", requireAuth(['access:agentB']), async (req, res)
 
 router.post('/email', requireAuth(['access:agentB']), async(req, res)=>{
   try{
+    if (!curated_resume) {
+      return res.status(400).json({ error: "No resume summary found. Please call /summarize_resume first." });
+    }
+    if (!startups || startups.length === 0) {
+      return res.status(400).json({ error: "No cached companies. Please call /recent_companies first." });
+    }
+
+    
 
   }catch(e){
 
