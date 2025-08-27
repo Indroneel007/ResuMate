@@ -5,7 +5,7 @@ import DescopeClient from '@descope/node-sdk';
 import multer from "multer";
 import pdfParse from "pdf-parse";
 import AgentA from "./curate_resume.js";
-
+import AgentB from "./agentB.js";
 dotenv.config();
 
 const app = express();
@@ -59,3 +59,4 @@ app.listen(PORT, () => {
 });
 
 app.use('/upload', upload.single('resume'), requireAuth(['curate:resume']), AgentA)
+app.use('/agentB', requireAuth(['access:agentB']), AgentB)

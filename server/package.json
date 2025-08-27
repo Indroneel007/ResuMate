@@ -11,6 +11,7 @@
   "dependencies": {
     "@descope/node-sdk": "^1.7.13",
     "@langchain/core": "^0.3.72",
+    "@langchain/langgraph": "^0.4.6",
     "@langchain/openai": "^0.6.9",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
@@ -18,6 +19,7 @@
     "fs": "^0.0.1-security",
     "langchain": "^0.3.31",
     "multer": "^2.0.2",
+    "node-fetch": "^3.3.2",
     "path": "^0.12.7",
     "pdf-parse": "^1.1.1",
     "router": "^2.2.0",
