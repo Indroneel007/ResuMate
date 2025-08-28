@@ -248,10 +248,47 @@ router.post('/email', requireAuth(['access:agentB']), async(req, res)=>{
       return res.status(400).json({ error: "No cached companies. Please call /recent_companies first." });
     }
 
-    
+    const {email} = req.user;
+    if(!email){
+      return res.status(400).json({ error: "No email found in user context." });
+    }
 
+    let results = [];
+
+    for (const company of startups) {
+      if (!company.emails || company.emails.length === 0) continue;
+
+      // Use the first email as recipient name if name not available
+      for (const toEmail of company.emails) {
+        const recipientName = toEmail.split('@')[0]; // crude fallback, ideally use real name if available
+
+        // 1. Curate personalized email
+        const emailContent = await emailCuratorTool.func(JSON.stringify({
+          resumeSummary: curated_resume,
+          companyName: company.company,
+          recipientName
+        }));
+
+        // 2. Send email
+        const sendResult = await sendEmailTool.func(JSON.stringify({
+          fromEmail,
+          toEmail: [toEmail],
+          subject: `Opportunities at ${company.company}`,
+          body: emailContent
+        }));
+
+        results.push({
+          company: company.company,
+          toEmail,
+          sendResult: JSON.parse(sendResult)
+        });
+      }
+    }
+
+    return res.status(200).json({ message: "Emails sent successfully." });
   }catch(e){
-
+    console.error("Error sending emails:", e);
+    return res.status(500).json({ error: "Failed to send emails." });
   }
 })
 
