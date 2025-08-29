@@ -7,6 +7,7 @@ import brevo from "@getbrevo/brevo";
 import { HumanMessage } from "@langchain/core/messages";
 import path from "path";
 import fs from "fs";
+import { google } from "googleapis";
 
 const router = express.Router();
 
@@ -15,6 +16,12 @@ brevoClient.setApiKey(
   brevo.TransactionalEmailsApiApiKeys.apiKey,
   process.env.BREVO_API_KEY
 )
+
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GMAIL_CLIENT_ID,
+  process.env.GMAIL_CLIENT_SECRET,
+  process.env.GMAIL_REDIRECT_URI
+);
 
 function requireAuth(requiredScopes){
   return async (req, res, next) => {
@@ -291,5 +298,36 @@ router.post('/email', requireAuth(['access:agentB']), async(req, res)=>{
     return res.status(500).json({ error: "Failed to send emails." });
   }
 })
+
+// -------------------------GMAIL-----------------------------
+router.get("/auth/google", (req, res) => {
+  const url = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    scope: ["https://www.googleapis.com/auth/gmail.readonly"]
+  });
+  res.redirect(url);
+});
+
+// Callback from Google
+router.get("/auth/callback", async (req, res) => {
+  try{
+    const { code } = req.query;
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    // Get logged-in Descope user
+    const sessionJwt = req.headers["authorization"]?.split(" ")[1];
+    const descopeClient = DescopeClient({ projectId: process.env.DESCOPE_PROJECT_ID });
+    const user = await descopeClient.validateJwt(sessionJwt);
+
+    // Store Gmail tokens linked to this Descope user (DB recommended)
+    console.log("Save tokens for user:", user.userId, tokens);
+
+    res.send("Gmail connected successfully!");
+  }catch(e){
+    console.error("Google OAuth error:", e);
+    res.status(500).json({ error: "Google OAuth failed" });
+  }
+});
 
 export default router;

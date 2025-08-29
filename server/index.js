@@ -5,13 +5,14 @@ import DescopeClient from '@descope/node-sdk';
 //const Descope = require("@descope/node-sdk");
 import multer from "multer";
 import AgentB from "./agentB.js";
+import bodyParser from "body-parser";
 dotenv.config();
 
 const app = express();
 
 app.use(cors({ origin: ["http://localhost:3000"], credentials: true }));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(bodyParser.json());
 
 const descope = DescopeClient({
   projectId: process.env.DESCOPE_PROJECT_ID,
@@ -31,6 +32,8 @@ const storage = multer.diskStorage({
 })
 
 const upload = multer({storage: storage})
+
+const userGmailTokens = new Map();
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
