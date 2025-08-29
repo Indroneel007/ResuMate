@@ -2,8 +2,8 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import DescopeClient from '@descope/node-sdk';
+//const Descope = require("@descope/node-sdk");
 import multer from "multer";
-import pdfParse from "pdf-parse";
 import AgentB from "./agentB.js";
 dotenv.config();
 
@@ -11,12 +11,11 @@ const app = express();
 
 app.use(cors({ origin: ["http://localhost:3000"], credentials: true }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-const descope = new DescopeClient({
+const descope = DescopeClient({
   projectId: process.env.DESCOPE_PROJECT_ID,
-}).catch(err => {
-  console.error("Descope initialization error:", err);
-});
+})
 
 const PORT = process.env.PORT || 5248;
 

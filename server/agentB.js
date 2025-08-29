@@ -5,16 +5,16 @@ import { Tool } from "@langchain/core/tools";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import brevo from "@getbrevo/brevo";
 import { HumanMessage } from "@langchain/core/messages";
-import {path} from "path";
-import {fs} from "fs";
+import path from "path";
+import fs from "fs";
 
 const router = express.Router();
 
-const brevoClient = new Brevo.TransactionalEmailsApi();
+const brevoClient = new brevo.TransactionalEmailsApi();
 brevoClient.setApiKey(
-  Brevo.TransactionalEmailsApiApiKeys.apiKey,
+  brevo.TransactionalEmailsApiApiKeys.apiKey,
   process.env.BREVO_API_KEY
-);
+)
 
 function requireAuth(requiredScopes){
   return async (req, res, next) => {
