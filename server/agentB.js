@@ -142,6 +142,42 @@ const emailContentExtractionTool = new Tool({
   },
 });
 
+// --------------------- Email Summary Tool --------------------
+const emailSummaryTool = new Tool({
+  name: "email_summary",
+  description: "Summarize email content into one liner with result",
+  func: async (input) => {
+    const { subject, body } = JSON.parse(input);
+
+    const prompt = `
+      You are an assistant that classifies emails about job applications.
+      The email content is below.
+      Return a JSON with:
+      - "summary": a 1-line plain English summary of the email
+      - "result": one of [
+        "accepted" :- If the candidate is qualified for the job,
+        "pending" :- If the application is under review or further interview processes are scheduled,
+        "rejected" :- If the candidate is not a fit or there was no opening at the moment
+      ]
+
+      Email Subject: ${subject}
+      Email Body: ${body}
+    `;
+
+    const response = await llm.invoke(prompt);
+    
+    let parsed;
+    
+    try {
+      parsed = JSON.parse(response.content);
+    } catch (e) {
+      parsed = { summary: "Could not parse", result: "pending" };
+    }
+
+    return parsed;
+  },
+});
+
 // --------------------- Resume Summarizer Tool --------------------
 const resumeSummarizerTool = new Tool({
   name: "resume_summarizer",
@@ -172,7 +208,7 @@ const llm = new ChatOpenAI({
 
 const agentA = createReactAgent({
   llm: llm,
-  tools: [resumeSummarizerTool, emailContentExtractionTool],
+  tools: [resumeSummarizerTool, emailContentExtractionTool, emailSummaryTool],
   maxIterations: 3,
 });
 
@@ -431,7 +467,11 @@ router.get("/emails", requireAuth(["access:agentA"]), async (req, res) => {
 
     let answer = []; //answer: {sender, summary, result}
 
-    
+    for(const email of matchedEmails) {
+      const { from, subject, body } = email;
+      const {summary, result} = await emailSummaryTool.func(JSON.stringify({ subject, body }));
+      answer.push({ sender: from, summary, result });
+    }
 
     res.json(answer);
   } catch (e) {
