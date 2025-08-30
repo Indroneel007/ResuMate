@@ -428,7 +428,7 @@ router.get("/auth/callback", async (req, res) => {
 });
 
 
-router.get("/emails", requireAuth(["access:agentA"]), async (req, res) => {
+router.get("/get_emails", requireAuth(["access:agentA"]), async (req, res) => {
   try {
     const userId = req.user.sub; // Descope user ID
     const tokens = gmailTokens[userId];
