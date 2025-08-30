@@ -18,10 +18,11 @@ brevoClient.setApiKey(
 )
 
 const oauth2Client = new google.auth.OAuth2(
-  process.env.GMAIL_CLIENT_ID,
-  process.env.GMAIL_CLIENT_SECRET,
-  process.env.GMAIL_REDIRECT_URI
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_REDIRECT_URI
 );
+
 
 function requireAuth(requiredScopes){
   return async (req, res, next) => {
@@ -83,6 +84,64 @@ const fundedStartupsTool = new Tool({
   },
 });
 
+// --------------------- Email Content Extraction Tool -----------------------------------
+const emailContentExtractionTool = new Tool({
+  name: "email_content_extraction",
+  description: "Extract all information from email content from specified users",
+  func: async (input) => {
+    const {auth, messageId} = JSON.parse(input);
+
+    const gmail = google.gmail({ version: "v1", auth });
+
+    // Fetch full message
+    const msgRes = await gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "full",
+    });
+
+    const msg = msgRes.data;
+
+    // Extract headers
+    const headers = msg.payload.headers;
+    const getHeader = (name) => {
+      const header = headers.find((h) => h.name.toLowerCase() === name.toLowerCase());
+      return header ? header.value : null;
+    };
+
+    // Extract snippet (preview text)
+    const snippet = msg.snippet;
+
+    // Extract body (plain text if available)
+    let body = "";
+    if (msg.payload.parts) {
+      // Multi-part email (text/plain, text/html, etc.)
+      const plainPart = msg.payload.parts.find((p) => p.mimeType === "text/plain");
+      if (plainPart && plainPart.body.data) {
+        body = Buffer.from(plainPart.body.data, "base64").toString("utf-8");
+      } else {
+        // fallback: use first available part
+        body = Buffer.from(msg.payload.parts[0].body.data, "base64").toString("utf-8");
+      }
+    } else if (msg.payload.body && msg.payload.body.data) {
+      // Single-part email
+      body = Buffer.from(msg.payload.body.data, "base64").toString("utf-8");
+    }
+
+    // Final clean JSON
+    return {
+      id: msg.id,
+      threadId: msg.threadId,
+      from: getHeader("From"),
+      to: getHeader("To"),
+      subject: getHeader("Subject"),
+      date: getHeader("Date"),
+      snippet: snippet,
+      body: body.trim(),
+    };
+  },
+});
+
 // --------------------- Resume Summarizer Tool --------------------
 const resumeSummarizerTool = new Tool({
   name: "resume_summarizer",
@@ -113,7 +172,7 @@ const llm = new ChatOpenAI({
 
 const agentA = createReactAgent({
   llm: llm,
-  tools: [resumeSummarizerTool],
+  tools: [resumeSummarizerTool, emailContentExtractionTool],
   maxIterations: 3,
 });
 
@@ -300,9 +359,12 @@ router.post('/email', requireAuth(['access:agentB']), async(req, res)=>{
 })
 
 // -------------------------GMAIL-----------------------------
+const gmailTokens = {};
+
 router.get("/auth/google", (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
+    prompt: 'consent',
     scope: ["https://www.googleapis.com/auth/gmail.readonly"]
   });
   res.redirect(url);
@@ -320,13 +382,61 @@ router.get("/auth/callback", async (req, res) => {
     const descopeClient = DescopeClient({ projectId: process.env.DESCOPE_PROJECT_ID });
     const user = await descopeClient.validateJwt(sessionJwt);
 
-    // Store Gmail tokens linked to this Descope user (DB recommended)
-    console.log("Save tokens for user:", user.userId, tokens);
+    gmailTokens[user.userId] = tokens;
 
     res.send("Gmail connected successfully!");
   }catch(e){
     console.error("Google OAuth error:", e);
     res.status(500).json({ error: "Google OAuth failed" });
+  }
+});
+
+
+router.get("/emails", requireAuth(["access:agentA"]), async (req, res) => {
+  try {
+    const userId = req.user.sub; // Descope user ID
+    const tokens = gmailTokens[userId];
+    if (!tokens) {
+      return res.status(401).json({ error: "User has not connected Gmail" });
+    }
+
+    // Init Gmail client with saved tokens
+    oauth2Client.setCredentials(tokens);
+    const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+
+    // Target senders are the company emails you already pulled
+    const targetSenders = startups.flatMap((s) => s.emails).filter(Boolean);
+
+    let matchedEmails = [];
+
+    for (const sender of targetSenders) {
+      // Step 1: list last email from this sender
+      const listRes = await gmail.users.messages.list({
+        userId: "me",
+        q: `from:${sender}`,
+        maxResults: 1,
+      });
+
+      if (!listRes.data.messages) continue;
+
+      // Step 2: run your extraction tool on each message
+      for (const msg of listRes.data.messages) {
+        const extracted = await emailContentExtractionTool.func(
+          JSON.stringify({ auth: oauth2Client, messageId: msg.id })
+        );
+
+        matchedEmails.push(extracted);
+      }
+    }
+
+    let answer = []; //answer: {sender, summary, result}
+
+    
+
+    res.json(answer);
+  } catch (e) {
+    console.error("Error fetching emails:", e);
+    res.status(500).json({ error: "Failed to fetch emails" });
   }
 });
 
