@@ -347,10 +347,10 @@ let curated_resume;
 
 router.post("/upload", upload.single("pdf"), async (req, res) => {
   try {
-    console.log("File metadata:", req.file.filename);
+    //console.log("File metadata:", req.file.filename);
 
     const filePath = path.join(__dirname, "uploads", req.file.filename);
-    console.log("File Uploaded now going to summarize", filePath);
+    //console.log("File Uploaded now going to summarize", filePath);
 
     // Instruct the agent explicitly to call the tool with the file path
     const result = await agentA.invoke({
@@ -383,7 +383,7 @@ router.post("/upload", upload.single("pdf"), async (req, res) => {
       summary = await resumeSummarizerTool.invoke(filePath);
     }
 
-    console.log("Summary: ", summary);
+    //console.log("Summary: ", summary);
     curated_resume = summary;
     res.json({ summary });
   } catch (e) {
@@ -394,14 +394,25 @@ router.post("/upload", upload.single("pdf"), async (req, res) => {
 
 let startups = [];
 
-router.get("/recent-companies", requireAuth(['access:agentB']), async (req, res) => {
+router.get("/recent-companies", async (req, res) => {
   try {
+    console.log("Fetching recent companies...");
+
     const response = await agentB.invoke({
-        input: "Fetch recently funded startups of this month with their description and domains in JSON format"
+        messages: [
+          new HumanMessage(
+            [
+              "You must use the tool 'fetch_funded_startups'",
+              "Do not summarize yourself. Call the tool and return ONLY the tool result.",
+            ].join("\n")
+          )
+        ]
     });
 
+    console.log("Agent B response:", response.messages[response.messages.length - 1].content);
+
     try{
-        startups = JSON.parse(response.output);
+        startups = JSON.parse(response.messages[response.messages.length - 1].content);
     } catch (err) {
         console.error("Failed to parse agent response:", err);
         return res.status(500).json({ error: "Failed to parse agent response" });
@@ -422,7 +433,7 @@ router.get("/recent-companies", requireAuth(['access:agentB']), async (req, res)
   }
 });
 
-router.post('/email', requireAuth(['access:agentB']), async(req, res)=>{
+router.post('/email', async(req, res)=>{
   try{
     if (!curated_resume) {
       return res.status(400).json({ error: "No resume summary found. Please call /summarize_resume first." });

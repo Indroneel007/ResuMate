@@ -1,11 +1,23 @@
 "use client";
 
 import React, { useRef, useState } from "react";
-import { MonitorUp } from "lucide-react";
+import { MonitorUp, ExternalLink } from "lucide-react";
+import { HoverCard, HoverCardTrigger, HoverCardContent } from "@/components/ui/hover-card";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
+import { Button } from "@/components/ui/button";
+
+type Company = {
+  company: string;
+  description: string;
+  url?: string;
+  domain?: string;
+  emails?: string[];
+};
 
 const MainPage = () => {
   const inputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(false);
+  const [companies, setCompanies] = useState<Company[]>([]);
 
   const handleClick = () => inputRef.current?.click();
 
@@ -27,6 +39,13 @@ const MainPage = () => {
       // Minimal feedback
       alert("Uploaded. Summary ready.");
       console.log("Summary:", data);
+
+      // Fetch recent companies after successful upload
+      const rec = await fetch("http://localhost:5248/recent-companies");
+      if (!rec.ok) throw new Error("Failed to fetch recent companies");
+      const companiesJson = await rec.json();
+      // Expecting array of {company, description, url, domain, emails}
+      setCompanies(Array.isArray(companiesJson) ? companiesJson : []);
     } catch (err) {
       console.error(err);
       alert("Failed to upload resume");
@@ -60,15 +79,67 @@ const MainPage = () => {
         <div className="rounded-2xl border border-neutral-800 bg-white p-5 text-neutral-900">
           <div className="mb-4 text-base font-medium">Company List</div>
 
-          <div className="rounded-xl border border-neutral-300 bg-neutral-100 p-4">
-            <div
-              role="button"
-              tabIndex={0}
-              className="mx-auto flex h-10 w-24 items-center justify-center rounded-lg border border-neutral-300 bg-white text-sm font-medium text-neutral-900 transition-colors hover:bg-neutral-100 focus:outline-none focus:ring-2 focus:ring-neutral-300"
-            >
-              Send
+          {companies.length === 0 ? (
+            <div className="text-sm text-neutral-500">No companies yet. Upload a resume to generate recommendations.</div>
+          ) : (
+            <div className="space-y-3">
+              {companies.map((c, idx) => (
+                <div key={idx} className="rounded-xl border border-neutral-300 bg-neutral-50 p-3">
+                  <HoverCard>
+                    <HoverCardTrigger asChild>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-semibold text-neutral-900 truncate" title={c.company}>
+                          {c.company}
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-neutral-600">
+                          {c.domain && <span className="truncate" title={c.domain}>{c.domain}</span>}
+                          {c.url && (
+                            <a
+                              className="inline-flex items-center gap-1 text-blue-600 hover:underline"
+                              href={c.url}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                            >
+                              <ExternalLink className="h-3 w-3" /> Visit
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    </HoverCardTrigger>
+                    <HoverCardContent className="max-w-xs text-sm">
+                      {c.description || "No description available."}
+                    </HoverCardContent>
+                  </HoverCard>
+
+                  <div className="mt-2">
+                    <Collapsible>
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm font-medium">Emails</div>
+                        <CollapsibleTrigger asChild>
+                          <Button variant="outline" size="sm">
+                            {c.emails?.length ? `Show (${c.emails.length})` : "Show"}
+                          </Button>
+                        </CollapsibleTrigger>
+                      </div>
+                      <CollapsibleContent>
+                        {c.emails && c.emails.length > 0 ? (
+                          <ul className="mt-2 list-disc pl-5 space-y-1 text-sm">
+                            {c.emails.map((em, i) => (
+                              <li key={i}>
+                                <a className="text-blue-700 hover:underline" href={`mailto:${em}`}>{em}</a>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="mt-2 text-xs text-neutral-500">No emails found.</div>
+                        )}
+                      </CollapsibleContent>
+                    </Collapsible>
+                  </div>
+                </div>
+              ))}
             </div>
-          </div>
+          )}
         </div>
       </div>
     </div>
