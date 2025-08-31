@@ -5,8 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "nodemon index.js"
   },
   "author": "",
   "license": "ISC",
@@ -16,7 +15,9 @@
     "@langchain/core": "^0.3.72",
     "@langchain/langgraph": "^0.4.6",
     "@langchain/openai": "^0.6.9",
+    "axios": "^1.11.0",
     "body-parser": "^2.2.0",
+    "cheerio": "^1.1.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
@@ -27,6 +28,7 @@
     "node-fetch": "^3.3.2",
     "path": "^0.12.7",
     "pdf-parse": "^1.1.1",
+    "pretty": "^2.0.0",
     "router": "^2.2.0",
     "sib-api-v3-sdk": "^8.5.0",
     "socket.io": "^4.8.1",
@@ -35,5 +37,9 @@
   "optionalDependencies": {
     "bufferutil": "^4.0.9",
     "utf-8-validate": "^6.0.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^24.3.0"
   }
 }

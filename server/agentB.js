@@ -11,6 +11,7 @@ import { google } from "googleapis";
 import multer from "multer";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import {chromium} from "playwright";
 // pdf-parse is dynamically imported inside the tool to avoid side effects on module load
 
 dotenv.config();
@@ -75,35 +76,53 @@ function requireAuth(requiredScopes){
 const fundedStartupsTool = new DynamicTool({
   name: "fetch_funded_startups",
   description: "Fetch recently funded startups of the current month with their description and domain",
-  func: async () => {
-    const query = `recently funded startups of ${new Date().toLocaleString("default", {
-      month: "long",
-      year: "numeric"
-    })} site:crunchbase.com OR site:techcrunch.com`;
+  func: async (input) => {
+    const { url } = JSON.parse(input);
 
-    const res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`, {
-      headers: {
-        "Accept": "application/json",
-        "X-Subscription-Token": process.env.BRAVE_API_KEY,
-      },
+    // Step 1: Scrape article
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+
+    const content = await page.evaluate(() => {
+      const paragraphs = Array.from(document.querySelectorAll("h1,h2,h3,p,li"))
+        .map(p => p.innerText)
+        .join("\n\n");
+      return paragraphs;
     });
+    await browser.close();
 
-    if (!res.ok) throw new Error("Brave API failed");
-    const data = await res.json();
+    console.log("Scraped content:", content);
 
-    return JSON.stringify(
-      data.web.results.map(r => {
-        const domain = new URL(r.url).hostname.replace("www.", "");
-        return {
-          company: r.title,
-          description: r.snippet,
-          url: r.url,
-          domain,
-        };
-      }),
-      null,
-      2
-    );
+    // Step 2: Ask LLM to extract companies
+    const response = await llm.invoke([
+      new HumanMessage({
+        content: [
+          {
+            type: "text",
+            text: `From the following article text, extract a JSON array of funded companies.
+Each item must follow this schema:
+{
+  "company": string,
+  "date": string
+}
+
+Article text:
+${content}`
+          }
+        ]
+      })
+    ]);
+
+    // Step 3: Parse JSON
+    try {
+      return JSON.parse(response.content[0].text);
+    } catch {
+      return {
+        error: "Invalid JSON from LLM",
+        raw: response.content[0].text
+      };
+    }
   },
 });
 
@@ -397,35 +416,37 @@ let startups = [];
 router.get("/recent-companies", async (req, res) => {
   try {
     console.log("Fetching recent companies...");
-
+    const url = "https://startups.gallery/news";
     const response = await agentB.invoke({
         messages: [
           new HumanMessage(
             [
-              "You must use the tool 'fetch_funded_startups'",
-              "Do not summarize yourself. Call the tool and return ONLY the tool result.",
+              "You must use the tool 'fetch_funded_startups' with the EXACT argument provided below.",
+              "Do not fetch yourself. Call the tool and return ONLY the tool result.",
+              "",
+              `ARGUMENT: ${JSON.stringify({ url })}`,
             ].join("\n")
           )
         ]
     });
 
     console.log("Agent B response:", response.messages[response.messages.length - 1].content);
-
     try{
-        startups = JSON.parse(response.messages[response.messages.length - 1].content);
-    } catch (err) {
+      startups = JSON.parse(response.messages[response.messages.length - 1].content);
+      } catch (err) {
         console.error("Failed to parse agent response:", err);
         return res.status(500).json({ error: "Failed to parse agent response" });
     }
-
-    const enriched = await Promise.all(
+        
+    return res.status(200).json({ startups });
+    /*const enriched = await Promise.all(
       startups.map(async (s) => {
         const emails = await fetchCompanyEmails(s.domain);
         return { ...s, emails };
       })
     );
 
-    return res.status(200).json(enriched);
+    return res.status(200).json(enriched);*/
 
   } catch (err) {
     console.error("Agent B error:", err);
