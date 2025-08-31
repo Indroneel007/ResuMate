@@ -4,7 +4,7 @@ import { ChatOpenAI } from "@langchain/openai";
 import { DynamicTool } from "@langchain/core/tools";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import brevo from "@getbrevo/brevo";
-//import { HumanMessage } from "@langchain/core/messages";
+import { HumanMessage } from "@langchain/core/messages";
 import path from "path";
 import fs from "fs";
 import { google } from "googleapis";
@@ -345,32 +345,52 @@ const upload = multer({storage: storage})
 
 let curated_resume;
 
-router.post("/upload", upload.single('pdf'), async(req, res)=>{
+router.post("/upload", upload.single("pdf"), async (req, res) => {
   try {
     console.log("File metadata:", req.file.filename);
 
-    const filePath = path.join(__dirname, 'uploads', req.file.filename);
+    const filePath = path.join(__dirname, "uploads", req.file.filename);
     console.log("File Uploaded now going to summarize", filePath);
 
-    /*const summary = await agentA.invoke({
-      input: `Summarize the uploaded resume in 5 bullet points.`,
-      tools: [{ name: "resume_summarizer", args: filePath }],
-    });*/
+    // Instruct the agent explicitly to call the tool with the file path
+    const result = await agentA.invoke({
+      messages: [
+        new HumanMessage(
+          [
+            "You must use the tool 'resume_summarizer' with the EXACT argument provided below.",
+            "Do not summarize yourself. Call the tool and return ONLY the tool result.",
+            "",
+            `ARGUMENT: ${filePath}`,
+          ].join("\n")
+        ),
+      ],
+    });
 
-    const summary = await resumeSummarizerTool.invoke(filePath);
+    // Extract final assistant message text from agent result
+    const last = result?.messages?.[result.messages.length - 1];
+    let summary = "";
+    if (last) {
+      summary = Array.isArray(last.content)
+        ? last.content
+            .map((p) => (typeof p === "string" ? p : p?.text ?? ""))
+            .filter(Boolean)
+            .join("\n")
+        : last.content ?? "";
+    }
 
-    /*const summary = await agentA.invoke(
-      { messages: [new HumanMessage("Summarize ")] },
-    );*/
+    // Fallback: if agent didn't return content, call the tool directly
+    if (!summary || !summary.trim()) {
+      summary = await resumeSummarizerTool.invoke(filePath);
+    }
 
-    console.log("Summary: ", summary)
+    console.log("Summary: ", summary);
     curated_resume = summary;
     res.json({ summary });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to summarize resume" });
   }
-})
+});
 
 let startups = [];
 
