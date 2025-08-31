@@ -1,13 +1,23 @@
 import express from "express";
 import fetch from "node-fetch"; 
 import { ChatOpenAI } from "@langchain/openai";
-import { Tool } from "@langchain/core/tools";
+import { DynamicTool } from "@langchain/core/tools";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import brevo from "@getbrevo/brevo";
-import { HumanMessage } from "@langchain/core/messages";
+//import { HumanMessage } from "@langchain/core/messages";
 import path from "path";
 import fs from "fs";
 import { google } from "googleapis";
+import multer from "multer";
+import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+// pdf-parse is dynamically imported inside the tool to avoid side effects on module load
+
+dotenv.config();
+
+// ESM-friendly __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const router = express.Router();
 
@@ -16,6 +26,19 @@ brevoClient.setApiKey(
   brevo.TransactionalEmailsApiApiKeys.apiKey,
   process.env.BREVO_API_KEY
 )
+
+const llm = new ChatOpenAI({
+  apiKey: process.env.OPENROUTER_API_KEY, // your OpenRouter key (sk-or-v...)
+  model: "moonshotai/kimi-k2:free",     // <-- use the correct slug from OpenRouter
+  temperature: 0,
+  configuration: {
+    baseURL: "https://openrouter.ai/api/v1",  // point to OpenRouter
+    defaultHeaders: {
+      "HTTP-Referer": "http://localhost:5248", // your app URL or domain
+      "X-Title": "ResuMate"
+    }
+  }
+});
 
 const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
@@ -49,7 +72,7 @@ function requireAuth(requiredScopes){
 
 
 // --------------------- Fetch Recently Funded Startups Tool --------------------
-const fundedStartupsTool = new Tool({
+const fundedStartupsTool = new DynamicTool({
   name: "fetch_funded_startups",
   description: "Fetch recently funded startups of the current month with their description and domain",
   func: async () => {
@@ -85,7 +108,7 @@ const fundedStartupsTool = new Tool({
 });
 
 // --------------------- Email Content Extraction Tool -----------------------------------
-const emailContentExtractionTool = new Tool({
+const emailContentExtractionTool = new DynamicTool({
   name: "email_content_extraction",
   description: "Extract all information from email content from specified users",
   func: async (input) => {
@@ -143,7 +166,7 @@ const emailContentExtractionTool = new Tool({
 });
 
 // --------------------- Email Summary Tool --------------------
-const emailSummaryTool = new Tool({
+const emailSummaryTool = new DynamicTool({
   name: "email_summary",
   description: "Summarize email content into one liner with result",
   func: async (input) => {
@@ -179,32 +202,42 @@ const emailSummaryTool = new Tool({
 });
 
 // --------------------- Resume Summarizer Tool --------------------
-const resumeSummarizerTool = new Tool({
+const resumeSummarizerTool = new DynamicTool({
   name: "resume_summarizer",
   description: "Summarize resumes into 5 bullet points highlighting experience & skills",
   func: async (filePath) => {
-    const response = await llm.invoke([
-      new HumanMessage({
-        content: [
-          {
-            type: "input_text",
-            text: "Summarize this resume in 5 bullet points highlighting experience & skills.",
-          },
-          { type: "input_file", file_data: { path: filePath } },
-        ],
-      }),
-    ]);
+    // Lazy import avoids module side effects at startup
+    const { default: pdf } = await import("pdf-parse");
+    const dataBuffer = fs.readFileSync(filePath);
+    const pdfData = await pdf(dataBuffer);
+    const resumeText = pdfData.text || "";
+
+    const prompt = `Summarize the following resume in 5 concise bullet points highlighting experience and skills.
+
+${resumeText.substring(0, 12000)}`;
+
+    const response = await llm.invoke(prompt);
+
+    // Robust normalization across SDK versions/providers
+    let out = "";
+    if (typeof response?.content === "string") {
+      out = response.content;
+    } else if (Array.isArray(response?.content)) {
+      out = response.content
+        .map((p) => (typeof p === "string" ? p : (p?.text ?? "")))
+        .filter(Boolean)
+        .join("\n");
+    } else if (response?.text) {
+      out = response.text;
+    } else {
+      out = String(response ?? "");
+    }
 
     fs.unlinkSync(filePath);
-    return response.content[0].text;
+    return out.trim();
   },
 });
 
-const llm = new ChatOpenAI({
-  openAIApiKey: process.env.OPENAI_API_KEY,
-  model: "gpt-oss-20b:free",
-  temperature: 0.7,
-});
 
 const agentA = createReactAgent({
   llm: llm,
@@ -248,7 +281,7 @@ async function fetchCompanyEmails(domain) {
 }
 
 // -------------------- Personalized Email Curator --------------------
-const emailCuratorTool = new Tool({
+const emailCuratorTool = new DynamicTool({
   name: "email_curator",
   description: "Generate a personalized email given resume summary, company name, and description",
   func: async (input) => {
@@ -270,7 +303,7 @@ const emailCuratorTool = new Tool({
 });
 
 // -------------------- Send Email --------------------
-const sendEmailTool = new Tool({
+const sendEmailTool = new DynamicTool({
   name: "send_email",
   description: "Send emails to multiple recipients using Brevo",
   func: async (input) => {
@@ -296,13 +329,41 @@ const agentB = createReactAgent({
   maxIterations: 3,
 });
 
+// ---------------------------- File Upload ---------------------------------
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+      cb(null, 'uploads/')
+  },
+  filename: function (req, file, cb) {
+      console.log(file)
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
+      cb(null, `${uniqueSuffix}-${file.originalname}`)
+  }
+})
+
+const upload = multer({storage: storage})
+
 let curated_resume;
 
-router.post("/upload", requireAuth(['access:agentA']), async(req, res)=>{
+router.post("/upload", upload.single('pdf'), async(req, res)=>{
   try {
-    const filePath = path.join(__dirname, "..", req.file.path);
-    const summary = await resumeSummarizerTool.func(filePath);
+    console.log("File metadata:", req.file.filename);
 
+    const filePath = path.join(__dirname, 'uploads', req.file.filename);
+    console.log("File Uploaded now going to summarize", filePath);
+
+    /*const summary = await agentA.invoke({
+      input: `Summarize the uploaded resume in 5 bullet points.`,
+      tools: [{ name: "resume_summarizer", args: filePath }],
+    });*/
+
+    const summary = await resumeSummarizerTool.invoke(filePath);
+
+    /*const summary = await agentA.invoke(
+      { messages: [new HumanMessage("Summarize ")] },
+    );*/
+
+    console.log("Summary: ", summary)
     curated_resume = summary;
     res.json({ summary });
   } catch (e) {
