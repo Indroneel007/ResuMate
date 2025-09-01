@@ -77,7 +77,14 @@ const fundedStartupsTool = new DynamicTool({
   name: "fetch_funded_startups",
   description: "Fetch recently funded startups of the current month with their description and domain",
   func: async (input) => {
-    const { url } = JSON.parse(input);
+    // Accept either a plain string URL or a JSON string { url }
+    let url = String(input || "").trim();
+    try {
+      const parsed = JSON.parse(String(input));
+      if (parsed && typeof parsed.url === "string") url = parsed.url;
+    } catch {}
+
+    if (!url) return JSON.stringify([]);
 
     // Step 1: Scrape article
     const browser = await chromium.launch({ headless: true });
@@ -92,36 +99,33 @@ const fundedStartupsTool = new DynamicTool({
     });
     await browser.close();
 
-    console.log("Scraped content:", content);
-
-    // Step 2: Ask LLM to extract companies
-    const response = await llm.invoke([
-      new HumanMessage({
-        content: [
-          {
-            type: "text",
-            text: `From the following article text, extract a JSON array of funded companies.
-Each item must follow this schema:
-{
-  "company": string,
-  "date": string
-}
+    // Step 2: Ask LLM to extract companies (return a JSON string array)
+    const prompt = `Extract a JSON array of companies from the article text below.
+Each item must be an object with keys: company (string), domain ("company.com" string).
+Respond with ONLY valid JSON (no markdown, no preface).
 
 Article text:
-${content}`
-          }
-        ]
-      })
-    ]);
+${content}`;
 
-    // Step 3: Parse JSON
+    const response = await llm.invoke(prompt);
+
+    // Normalize and ensure we return a JSON string
+    let out = "";
+    if (typeof response?.content === "string") out = response.content;
+    else if (Array.isArray(response?.content)) {
+      out = response.content.map((p) => (typeof p === "string" ? p : (p?.text ?? ""))).join("\n");
+    } else if (response?.text) out = response.text;
+    else out = String(response ?? "");
+
+    out = out.trim();
     try {
-      return JSON.parse(response.content[0].text);
+      const parsed = JSON.parse(out);
+      // Ensure we only return the first 5 companies
+      const topFive = Array.isArray(parsed) ? parsed.slice(0, 5) : [];
+      return JSON.stringify(topFive);
     } catch {
-      return {
-        error: "Invalid JSON from LLM",
-        raw: response.content[0].text
-      };
+      // If not valid JSON, return empty list to avoid crashing the agent
+      return JSON.stringify([]);
     }
   },
 });
@@ -366,43 +370,47 @@ let curated_resume;
 
 router.post("/upload", upload.single("pdf"), async (req, res) => {
   try {
-    //console.log("File metadata:", req.file.filename);
+    // console.log("File metadata:", req.file.filename);
 
     const filePath = path.join(__dirname, "uploads", req.file.filename);
-    //console.log("File Uploaded now going to summarize", filePath);
+    // console.log("File Uploaded now going to summarize", filePath);
 
-    // Instruct the agent explicitly to call the tool with the file path
-    const result = await agentA.invoke({
-      messages: [
-        new HumanMessage(
-          [
-            "You must use the tool 'resume_summarizer' with the EXACT argument provided below.",
-            "Do not summarize yourself. Call the tool and return ONLY the tool result.",
-            "",
-            `ARGUMENT: ${filePath}`,
-          ].join("\n")
-        ),
-      ],
-    });
-
-    // Extract final assistant message text from agent result
-    const last = result?.messages?.[result.messages.length - 1];
     let summary = "";
-    if (last) {
-      summary = Array.isArray(last.content)
-        ? last.content
-            .map((p) => (typeof p === "string" ? p : p?.text ?? ""))
-            .filter(Boolean)
-            .join("\n")
-        : last.content ?? "";
+    try {
+      // Try via agent first
+      const result = await agentA.invoke({
+        messages: [
+          new HumanMessage(
+            [
+              "You must use the tool 'resume_summarizer' with the EXACT argument provided below.",
+              "Do not summarize yourself. Call the tool and return ONLY the tool result.",
+              "",
+              `ARGUMENT: ${filePath}`,
+            ].join("\n")
+          ),
+        ],
+      });
+
+      const last = result?.messages?.[result.messages.length - 1];
+      if (last) {
+        summary = Array.isArray(last.content)
+          ? last.content
+              .map((p) => (typeof p === "string" ? p : p?.text ?? ""))
+              .filter(Boolean)
+              .join("\n")
+          : last.content ?? "";
+      }
+    } catch (agentErr) {
+      // If agent fails (e.g., model lacks tool support), fall back to direct tool
+      console.warn("Agent failed; falling back to tool:", agentErr?.message || agentErr);
     }
 
-    // Fallback: if agent didn't return content, call the tool directly
     if (!summary || !summary.trim()) {
       summary = await resumeSummarizerTool.invoke(filePath);
     }
 
-    //console.log("Summary: ", summary);
+    //console.log(summary)
+
     curated_resume = summary;
     res.json({ summary });
   } catch (e) {
@@ -424,29 +432,29 @@ router.get("/recent-companies", async (req, res) => {
               "You must use the tool 'fetch_funded_startups' with the EXACT argument provided below.",
               "Do not fetch yourself. Call the tool and return ONLY the tool result.",
               "",
-              `ARGUMENT: ${JSON.stringify({ url })}`,
+              `ARGUMENT: ${url}`,
             ].join("\n")
           )
         ]
     });
 
-    console.log("Agent B response:", response.messages[response.messages.length - 1].content);
+   // console.log("Agent B response:", response.messages[response.messages.length - 1].content);
     try{
       startups = JSON.parse(response.messages[response.messages.length - 1].content);
       } catch (err) {
         console.error("Failed to parse agent response:", err);
         return res.status(500).json({ error: "Failed to parse agent response" });
     }
-        
-    return res.status(200).json({ startups });
-    /*const enriched = await Promise.all(
+    // Return an array to match client expectations
+    return res.status(200).json(startups);
+    const enriched = await Promise.all(
       startups.map(async (s) => {
         const emails = await fetchCompanyEmails(s.domain);
         return { ...s, emails };
       })
     );
 
-    return res.status(200).json(enriched);*/
+    return res.status(200).json(enriched);
 
   } catch (err) {
     console.error("Agent B error:", err);
