@@ -18,6 +18,9 @@ const MainPage = () => {
   const inputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(false);
   const [companies, setCompanies] = useState<Company[]>([]);
+  const [gmailConnected, setGmailConnected] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [sending, setSending] = useState(false);
 
   const handleClick = () => inputRef.current?.click();
 
@@ -46,12 +49,68 @@ const MainPage = () => {
       const companiesJson = await rec.json();
       // Expecting array of {company, description, url, domain, emails}
       setCompanies(Array.isArray(companiesJson) ? companiesJson : []);
+
+      // Check current Gmail status
+      try {
+        const st = await fetch("http://localhost:5248/auth/status");
+        if (st.ok) {
+          const j = await st.json();
+          setGmailConnected(Boolean(j?.connected));
+        }
+      } catch {}
     } catch (err) {
       console.error(err);
       alert("Failed to upload resume");
     } finally {
       setLoading(false);
       if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  const handleConnectGmail = async () => {
+    try {
+      setConnecting(true);
+      // Open OAuth in a new tab
+      window.open("http://localhost:5248/auth/google", "_blank");
+      // Poll status
+      const started = Date.now();
+      const interval = setInterval(async () => {
+        try {
+          const r = await fetch("http://localhost:5248/auth/status");
+          if (r.ok) {
+            const j = await r.json();
+            if (j?.connected) {
+              clearInterval(interval);
+              setGmailConnected(true);
+              setConnecting(false);
+            }
+          }
+        } catch {}
+        if (Date.now() - started > 120000) { // 2 minutes timeout
+          clearInterval(interval);
+          setConnecting(false);
+          alert("Gmail connection timed out. Please try again.");
+        }
+      }, 2000);
+    } catch (e) {
+      console.error(e);
+      setConnecting(false);
+    }
+  };
+
+  const handleSendEmails = async () => {
+    try {
+      setSending(true);
+      const res = await fetch("http://localhost:5248/email", { method: "POST" });
+      if (!res.ok) throw new Error("Send failed");
+      const j = await res.json();
+      alert("Emails sent successfully.");
+      console.log(j);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to send emails");
+    } finally {
+      setSending(false);
     }
   };
 
@@ -138,6 +197,19 @@ const MainPage = () => {
                   </div>
                 </div>
               ))}
+
+              {/* Gmail connect / send controls */}
+              <div className="pt-2">
+                {!gmailConnected ? (
+                  <Button onClick={handleConnectGmail} disabled={connecting}>
+                    {connecting ? "Connecting..." : "Connect to Gmail"}
+                  </Button>
+                ) : (
+                  <Button variant="default" onClick={handleSendEmails} disabled={sending}>
+                    {sending ? "Sending..." : "Send"}
+                  </Button>
+                )}
+              </div>
             </div>
           )}
         </div>

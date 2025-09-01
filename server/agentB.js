@@ -447,7 +447,7 @@ router.get("/recent-companies", async (req, res) => {
     }
     // Return an array to match client expectations
     return res.status(200).json(startups);
-    const enriched = await Promise.all(
+    /*const enriched = await Promise.all(
       startups.map(async (s) => {
         const emails = await fetchCompanyEmails(s.domain);
         return { ...s, emails };
@@ -455,7 +455,7 @@ router.get("/recent-companies", async (req, res) => {
     );
 
     return res.status(200).json(enriched);
-
+*/
   } catch (err) {
     console.error("Agent B error:", err);
     return res.status(500).json({ error: err.message });
@@ -519,29 +519,74 @@ router.post('/email', async(req, res)=>{
 const gmailTokens = {};
 
 router.get("/auth/google", (req, res) => {
-  const url = oauth2Client.generateAuthUrl({
+  const missing = [
+    !process.env.GOOGLE_CLIENT_ID && "GOOGLE_CLIENT_ID",
+    !process.env.GOOGLE_CLIENT_SECRET && "GOOGLE_CLIENT_SECRET",
+    !process.env.GOOGLE_REDIRECT_URI && "GOOGLE_REDIRECT_URI",
+  ].filter(Boolean);
+  if (missing.length) {
+    return res.status(500).json({
+      error: "Missing Google OAuth env vars",
+      missing,
+      hint: "Set these in server/.env. Example: GOOGLE_REDIRECT_URI=http://localhost:5248/api/auth/callback",
+    });
+  }
+
+  // Build client per-request to ensure redirect_uri is present
+  const client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_REDIRECT_URI
+  );
+
+  const url = client.generateAuthUrl({
     access_type: "offline",
     prompt: 'consent',
-    scope: ["https://www.googleapis.com/auth/gmail.readonly"]
+    scope: ["https://www.googleapis.com/auth/gmail.readonly"],
   });
   res.redirect(url);
 });
 
+// Simple status check (demo): returns true if any user connected
+router.get("/auth/status", (req, res) => {
+  try{
+    const connected = Object.keys(gmailTokens).length > 0;
+    return res.json({ connected });
+  }catch(e){
+    console.error("Status error:", e);
+    return res.status(500).json({ connected: false });
+  }
+});
+
 // Callback from Google
-router.get("/auth/callback", async (req, res) => {
+router.get("/api/auth/callback", async (req, res) => {
   try{
     const { code } = req.query;
-    const { tokens } = await oauth2Client.getToken(code);
-    oauth2Client.setCredentials(tokens);
+    // Use a fresh client with the configured redirect URI for token exchange
+    const client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
+    );
+    const { tokens } = await client.getToken(code);
+    client.setCredentials(tokens);
 
-    // Get logged-in Descope user
-    const sessionJwt = req.headers["authorization"]?.split(" ")[1];
-    const descopeClient = DescopeClient({ projectId: process.env.DESCOPE_PROJECT_ID });
-    const user = await descopeClient.validateJwt(sessionJwt);
+    // Try to associate with a Descope user if Authorization header is present; otherwise store under 'default'
+    try {
+      const sessionJwt = req.headers["authorization"]?.split(" ")[1];
+      if (sessionJwt) {
+        const descopeClient = DescopeClient({ projectId: process.env.DESCOPE_PROJECT_ID });
+        const user = await descopeClient.validateJwt(sessionJwt);
+        gmailTokens[user.userId] = tokens;
+      } else {
+        gmailTokens["default"] = tokens;
+      }
+    } catch (assocErr) {
+      console.warn("OAuth callback: could not associate tokens to user, storing as 'default'", assocErr?.message || assocErr);
+      gmailTokens["default"] = tokens;
+    }
 
-    gmailTokens[user.userId] = tokens;
-
-    res.send("Gmail connected successfully!");
+    res.send("Gmail connected successfully! You can close this tab.");
   }catch(e){
     console.error("Google OAuth error:", e);
     res.status(500).json({ error: "Google OAuth failed" });
