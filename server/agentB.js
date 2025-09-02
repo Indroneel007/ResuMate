@@ -8,6 +8,7 @@ import { HumanMessage } from "@langchain/core/messages";
 import path from "path";
 import fs from "fs";
 import { google } from "googleapis";
+import DescopeClient from "@descope/node-sdk";
 import multer from "multer";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
@@ -471,9 +472,39 @@ router.post('/email', async(req, res)=>{
       return res.status(400).json({ error: "No cached companies. Please call /recent_companies first." });
     }
 
-    const {email} = req.user;
-    if(!email){
-      return res.status(400).json({ error: "No email found in user context." });
+    // Derive sender from authenticated user (Descope)
+    const auth = req.headers.authorization || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+
+    const descope = DescopeClient({ projectId: process.env.DESCOPE_PROJECT_ID });
+    let fromEmail = null;
+
+    if (token) {
+      // Try session token first
+      try {
+        const { token: claims } = await descope.validateSession(token);
+        fromEmail = claims?.email || claims?.user?.email;
+      } catch {}
+      // Fallback to validating raw JWT
+      if (!fromEmail) {
+        try {
+          const jwtUser = await descope.validateJwt(token);
+          fromEmail = jwtUser?.email || jwtUser?.user?.email || jwtUser?.data?.email;
+        } catch {}
+      }
+    }
+
+    // Final fallback: accept fromEmail in body (development-friendly)
+    if (!fromEmail && req.body && typeof req.body.fromEmail === 'string') {
+      const candidate = String(req.body.fromEmail).trim();
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (emailRegex.test(candidate)) {
+        fromEmail = candidate;
+      }
+    }
+
+    if (!fromEmail) {
+      return res.status(401).json({ error: "Unauthorized: provide a valid bearer token or include fromEmail in request body" });
     }
 
     let results = [];

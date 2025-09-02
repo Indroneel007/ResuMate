@@ -5,6 +5,7 @@ import { MonitorUp, ExternalLink } from "lucide-react";
 import { HoverCard, HoverCardTrigger, HoverCardContent } from "@/components/ui/hover-card";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 type Company = {
   company: string;
@@ -101,14 +102,42 @@ const MainPage = () => {
   const handleSendEmails = async () => {
     try {
       setSending(true);
-      const res = await fetch("http://localhost:5248/email", { method: "POST" });
+      // Try to read a session token (adjust keys as per your auth setup)
+      const token =
+        (typeof window !== "undefined" && (localStorage.getItem("sessionToken") || localStorage.getItem("descopeSessionToken"))) ||
+        undefined;
+
+      // If no token, ask user for a sender email (dev fallback)
+      let body: any = undefined;
+      let headers: Record<string, string> | undefined = undefined;
+      if (token) {
+        headers = { Authorization: `Bearer ${token}` };
+      } else {
+        const fromEmail = typeof window !== "undefined" ? window.prompt("Enter your sender email address:") : undefined;
+        if (fromEmail) {
+          headers = { "Content-Type": "application/json" };
+          body = JSON.stringify({ fromEmail });
+        }
+      }
+
+      const res = await fetch("http://localhost:5248/email", {
+        method: "POST",
+        headers,
+        body,
+        credentials: "include",
+      });
       if (!res.ok) throw new Error("Send failed");
       const j = await res.json();
-      alert("Emails sent successfully.");
+      alert("Emails sent");
       console.log(j);
     } catch (e) {
       console.error(e);
-      alert("Failed to send emails");
+      // Give more actionable message on auth failures
+      if ((e as Error)?.message === "Send failed") {
+        alert("Failed to send emails. Make sure you are signed in so we can use your email as the sender.");
+      } else {
+        alert("Failed to send emails");
+      }
     } finally {
       setSending(false);
     }
@@ -141,62 +170,66 @@ const MainPage = () => {
           {companies.length === 0 ? (
             <div className="text-sm text-neutral-500">No companies yet. Upload a resume to generate recommendations.</div>
           ) : (
-            <div className="space-y-3">
-              {companies.map((c, idx) => (
-                <div key={idx} className="rounded-xl border border-neutral-300 bg-neutral-50 p-3">
-                  <HoverCard>
-                    <HoverCardTrigger asChild>
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="font-semibold text-neutral-900 truncate" title={c.company}>
-                          {c.company}
-                        </div>
-                        <div className="flex items-center gap-2 text-xs text-neutral-600">
-                          {c.domain && <span className="truncate" title={c.domain}>{c.domain}</span>}
-                          {c.url && (
-                            <a
-                              className="inline-flex items-center gap-1 text-blue-600 hover:underline"
-                              href={c.url}
-                              target="_blank"
-                              rel="noreferrer noopener"
-                            >
-                              <ExternalLink className="h-3 w-3" /> Visit
-                            </a>
-                          )}
-                        </div>
-                      </div>
-                    </HoverCardTrigger>
-                    <HoverCardContent className="max-w-xs text-sm">
-                      {c.description || "No description available."}
-                    </HoverCardContent>
-                  </HoverCard>
+            <>
+              <ScrollArea className="h-72 pr-2">
+                <div className="space-y-3">
+                  {companies.map((c, idx) => (
+                    <div key={idx} className="rounded-xl border border-neutral-300 bg-neutral-50 p-3">
+                      <HoverCard>
+                        <HoverCardTrigger asChild>
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="font-semibold text-neutral-900 truncate" title={c.company}>
+                              {c.company}
+                            </div>
+                            <div className="flex items-center gap-2 text-xs text-neutral-600">
+                              {c.domain && <span className="truncate" title={c.domain}>{c.domain}</span>}
+                              {c.url && (
+                                <a
+                                  className="inline-flex items-center gap-1 text-blue-600 hover:underline"
+                                  href={c.url}
+                                  target="_blank"
+                                  rel="noreferrer noopener"
+                                >
+                                  <ExternalLink className="h-3 w-3" /> Visit
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                        </HoverCardTrigger>
+                        <HoverCardContent className="max-w-xs text-sm">
+                          {c.description || "No description available."}
+                        </HoverCardContent>
+                      </HoverCard>
 
-                  <div className="mt-2">
-                    <Collapsible>
-                      <div className="flex items-center justify-between">
-                        <div className="text-sm font-medium">Emails</div>
-                        <CollapsibleTrigger asChild>
-                          <Button variant="outline" size="sm">
-                            {c.emails?.length ? `Show (${c.emails.length})` : "Show"}
-                          </Button>
-                        </CollapsibleTrigger>
+                      <div className="mt-2">
+                        <Collapsible>
+                          <div className="flex items-center justify-between">
+                            <div className="text-sm font-medium">Emails</div>
+                            <CollapsibleTrigger asChild>
+                              <Button variant="outline" size="sm">
+                                {c.emails?.length ? `Show (${c.emails.length})` : "Show"}
+                              </Button>
+                            </CollapsibleTrigger>
+                          </div>
+                          <CollapsibleContent>
+                            {c.emails && c.emails.length > 0 ? (
+                              <ul className="mt-2 list-disc pl-5 space-y-1 text-sm">
+                                {c.emails.map((em, i) => (
+                                  <li key={i}>
+                                    <a className="text-blue-700 hover:underline" href={`mailto:${em}`}>{em}</a>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="mt-2 text-xs text-neutral-500">No emails found.</div>
+                            )}
+                          </CollapsibleContent>
+                        </Collapsible>
                       </div>
-                      <CollapsibleContent>
-                        {c.emails && c.emails.length > 0 ? (
-                          <ul className="mt-2 list-disc pl-5 space-y-1 text-sm">
-                            {c.emails.map((em, i) => (
-                              <li key={i}>
-                                <a className="text-blue-700 hover:underline" href={`mailto:${em}`}>{em}</a>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <div className="mt-2 text-xs text-neutral-500">No emails found.</div>
-                        )}
-                      </CollapsibleContent>
-                    </Collapsible>
-                  </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </ScrollArea>
 
               {/* Gmail connect / send controls */}
               <div className="pt-2">
@@ -210,7 +243,7 @@ const MainPage = () => {
                   </Button>
                 )}
               </div>
-            </div>
+            </>
           )}
         </div>
       </div>
