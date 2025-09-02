@@ -102,41 +102,52 @@ const MainPage = () => {
   const handleSendEmails = async () => {
     try {
       setSending(true);
-      // Try to read a session token (adjust keys as per your auth setup)
-      const token =
-        (typeof window !== "undefined" && (localStorage.getItem("sessionToken") || localStorage.getItem("descopeSessionToken"))) ||
-        undefined;
+      // Try to read a session token from various possible keys
+      let token = undefined;
+      if (typeof window !== "undefined") {
+        // Check common Descope token keys
+        token = localStorage.getItem("DSR") ||  // Descope refresh token
+                localStorage.getItem("DS") ||   // Descope session token
+                localStorage.getItem("sessionToken") || 
+                localStorage.getItem("descopeSessionToken") ||
+                localStorage.getItem("descope-session") ||
+                localStorage.getItem("access_token") ||
+                localStorage.getItem("authToken");
+        
+        // Debug: log available localStorage keys
+        console.log("Available localStorage keys:", Object.keys(localStorage));
+        console.log("Found token:", token ? "Yes" : "No");
+      }
 
-      // If no token, ask user for a sender email (dev fallback)
-      let body: any = undefined;
-      let headers: Record<string, string> | undefined = undefined;
-      if (token) {
-        headers = { Authorization: `Bearer ${token}` };
-      } else {
-        const fromEmail = typeof window !== "undefined" ? window.prompt("Enter your sender email address:") : undefined;
-        if (fromEmail) {
-          headers = { "Content-Type": "application/json" };
-          body = JSON.stringify({ fromEmail });
-        }
+      if (!token) {
+        alert("Please sign in first to send emails. Check browser console for available tokens.");
+        return;
       }
 
       const res = await fetch("http://localhost:5248/email", {
         method: "POST",
-        headers,
-        body,
+        headers: { Authorization: `Bearer ${token}` },
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Send failed");
+      
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ error: "Unknown error" }));
+        throw new Error(errorData.error || "Send failed");
+      }
+      
       const j = await res.json();
       alert("Emails sent");
       console.log(j);
     } catch (e) {
       console.error(e);
-      // Give more actionable message on auth failures
-      if ((e as Error)?.message === "Send failed") {
-        alert("Failed to send emails. Make sure you are signed in so we can use your email as the sender.");
+      const errorMessage = (e as Error)?.message || "Failed to send emails";
+      
+      if (errorMessage.includes("Gmail not connected")) {
+        alert("Please connect to Gmail first before sending emails.");
+      } else if (errorMessage.includes("Authentication required") || errorMessage.includes("Invalid or expired token")) {
+        alert("Please sign in to send emails.");
       } else {
-        alert("Failed to send emails");
+        alert(`Failed to send emails: ${errorMessage}`);
       }
     } finally {
       setSending(false);
@@ -232,16 +243,22 @@ const MainPage = () => {
               </ScrollArea>
 
               {/* Gmail connect / send controls */}
-              <div className="pt-2">
-                {!gmailConnected ? (
-                  <Button onClick={handleConnectGmail} disabled={connecting}>
-                    {connecting ? "Connecting..." : "Connect to Gmail"}
-                  </Button>
-                ) : (
-                  <Button variant="default" onClick={handleSendEmails} disabled={sending}>
-                    {sending ? "Sending..." : "Send"}
-                  </Button>
-                )}
+              <div className="pt-2 space-y-2">
+                <Button 
+                  onClick={handleConnectGmail} 
+                  disabled={connecting}
+                  variant={gmailConnected ? "outline" : "default"}
+                >
+                  {connecting ? "Connecting..." : gmailConnected ? "Gmail Connected" : "Connect to Gmail"}
+                </Button>
+                <Button 
+                  variant="default" 
+                  onClick={handleSendEmails} 
+                  disabled={sending || !gmailConnected}
+                  className="w-full"
+                >
+                  {sending ? "Sending..." : "Send Emails"}
+                </Button>
               </div>
             </>
           )}

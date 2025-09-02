@@ -23,6 +23,9 @@ const __dirname = path.dirname(__filename);
 
 const router = express.Router();
 
+// Shared Descope client
+const descope = DescopeClient({ projectId: process.env.DESCOPE_PROJECT_ID });
+
 const brevoClient = new brevo.TransactionalEmailsApi();
 brevoClient.setApiKey(
   brevo.TransactionalEmailsApiApiKeys.apiKey,
@@ -68,6 +71,76 @@ function requireAuth(requiredScopes){
       next();
     } catch {
       return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+  };
+}
+
+// Authorization middleware for email sending
+function requireEmailAuth() {
+  return async (req, res, next) => {
+    try {
+      const auth = req.headers.authorization || '';
+      const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+      if (!token) return res.status(401).json({ error: 'Authentication required to send emails' });
+
+      // Validate token and get user
+      let user = null;
+      try {
+        const { token: claims } = await descope.validateSession(token);
+        user = claims;
+      } catch {
+        try {
+          user = await descope.validateJwt(token);
+        } catch {
+          return res.status(401).json({ error: 'Invalid or expired token' });
+        }
+      }
+
+      if (!user?.sub) return res.status(401).json({ error: 'Invalid user token' });
+
+      // Check if user has connected Gmail
+      const userId = user.sub;
+      const tokens = gmailTokens[userId] || gmailTokens['default'];
+      if (!tokens) {
+        return res.status(403).json({ error: 'Gmail not connected. Please connect Gmail first to send emails.' });
+      }
+
+      // Get user's email from Gmail profile
+      try {
+        const oauth2Client = new google.auth.OAuth2(
+          process.env.GOOGLE_CLIENT_ID,
+          process.env.GOOGLE_CLIENT_SECRET,
+          process.env.GOOGLE_REDIRECT_URI
+        );
+        oauth2Client.setCredentials(tokens);
+        
+        // Check if tokens are valid and refresh if needed
+        try {
+          await oauth2Client.getAccessToken();
+        } catch (tokenError) {
+          console.error('Token refresh failed:', tokenError);
+          return res.status(403).json({ error: 'Gmail tokens expired. Please reconnect Gmail.' });
+        }
+        
+        const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+        const profile = await oauth2.userinfo.get();
+        
+        if (!profile.data.email) {
+          console.error('No email in Gmail profile');
+          return res.status(403).json({ error: 'Unable to get email from Gmail profile' });
+        }
+        
+        req.user = user;
+        req.userEmail = profile.data.email;
+        req.gmailTokens = tokens;
+        next();
+      } catch (e) {
+        console.error('Failed to get Gmail profile:', e.message, e.response?.data);
+        return res.status(403).json({ error: `Failed to verify Gmail connection: ${e.message}` });
+      }
+    } catch (e) {
+      console.error('Email auth error:', e);
+      return res.status(500).json({ error: 'Authentication error' });
     }
   };
 }
@@ -447,8 +520,8 @@ router.get("/recent-companies", async (req, res) => {
         return res.status(500).json({ error: "Failed to parse agent response" });
     }
     // Return an array to match client expectations
-    return res.status(200).json(startups);
-    /*const enriched = await Promise.all(
+    //return res.status(200).json(startups);
+    const enriched = await Promise.all(
       startups.map(async (s) => {
         const emails = await fetchCompanyEmails(s.domain);
         return { ...s, emails };
@@ -456,14 +529,14 @@ router.get("/recent-companies", async (req, res) => {
     );
 
     return res.status(200).json(enriched);
-*/
+
   } catch (err) {
     console.error("Agent B error:", err);
     return res.status(500).json({ error: err.message });
   }
 });
 
-router.post('/email', async(req, res)=>{
+router.post('/email', requireEmailAuth(), async(req, res)=>{
   try{
     if (!curated_resume) {
       return res.status(400).json({ error: "No resume summary found. Please call /summarize_resume first." });
@@ -472,40 +545,8 @@ router.post('/email', async(req, res)=>{
       return res.status(400).json({ error: "No cached companies. Please call /recent_companies first." });
     }
 
-    // Derive sender from authenticated user (Descope)
-    const auth = req.headers.authorization || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-
-    const descope = DescopeClient({ projectId: process.env.DESCOPE_PROJECT_ID });
-    let fromEmail = null;
-
-    if (token) {
-      // Try session token first
-      try {
-        const { token: claims } = await descope.validateSession(token);
-        fromEmail = claims?.email || claims?.user?.email;
-      } catch {}
-      // Fallback to validating raw JWT
-      if (!fromEmail) {
-        try {
-          const jwtUser = await descope.validateJwt(token);
-          fromEmail = jwtUser?.email || jwtUser?.user?.email || jwtUser?.data?.email;
-        } catch {}
-      }
-    }
-
-    // Final fallback: accept fromEmail in body (development-friendly)
-    if (!fromEmail && req.body && typeof req.body.fromEmail === 'string') {
-      const candidate = String(req.body.fromEmail).trim();
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (emailRegex.test(candidate)) {
-        fromEmail = candidate;
-      }
-    }
-
-    if (!fromEmail) {
-      return res.status(401).json({ error: "Unauthorized: provide a valid bearer token or include fromEmail in request body" });
-    }
+    // Use the Gmail-connected user's email as sender
+    const fromEmail = req.userEmail;
 
     let results = [];
 
@@ -517,25 +558,41 @@ router.post('/email', async(req, res)=>{
         const recipientName = toEmail.split('@')[0]; // crude fallback, ideally use real name if available
 
         // 1. Curate personalized email
-        const emailContent = await emailCuratorTool.func(JSON.stringify({
-          resumeSummary: curated_resume,
-          companyName: company.company,
-          recipientName
-        }));
+        const emailContent = await agentB.invoke({
+          messages: [
+            new HumanMessage(
+              [
+                "You must use the tool 'email_curator' with the EXACT argument provided below.",
+                "Do not fetch yourself. Call the tool and return ONLY the tool result.",
+                "",
+                `ARGUMENT: ${curated_resume, company.company, recipientName}`,
+              ].join("\n")
+            )
+          ]
+        });
+        console.log(emailContent);
 
         // 2. Send email
-        const sendResult = await sendEmailTool.func(JSON.stringify({
-          fromEmail,
-          toEmail: [toEmail],
-          subject: `Opportunities at ${company.company}`,
-          body: emailContent
-        }));
+        const subject = `Application for Opportunities at ${company.company}`;
 
-        results.push({
+        const sendResult = await agentB.invoke({
+          messages: [
+            new HumanMessage(
+              [
+                "You must use the tool 'send_email' with the EXACT argument provided below.",
+                "Do not fetch yourself. Call the tool and return ONLY the tool result.",
+                "",
+                `ARGUMENT: ${fromEmail, toEmail, subject, emailContent}`,
+              ].join("\n")
+            )
+          ]
+        });
+
+        /*results.push({
           company: company.company,
           toEmail,
           sendResult: JSON.parse(sendResult)
-        });
+        });*/
       }
     }
 
@@ -573,7 +630,11 @@ router.get("/auth/google", (req, res) => {
   const url = client.generateAuthUrl({
     access_type: "offline",
     prompt: 'consent',
-    scope: ["https://www.googleapis.com/auth/gmail.readonly"],
+    scope: [
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile"
+    ],
   });
   res.redirect(url);
 });
