@@ -13,7 +13,6 @@ import multer from "multer";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import {chromium} from "playwright";
-// pdf-parse is dynamically imported inside the tool to avoid side effects on module load
 
 dotenv.config();
 
@@ -195,7 +194,7 @@ ${content}`;
     try {
       const parsed = JSON.parse(out);
       // Ensure we only return the first 5 companies
-      const topFive = Array.isArray(parsed) ? parsed.slice(0, 5) : [];
+      const topFive = Array.isArray(parsed) ? parsed.slice(0, 2) : [];
       return JSON.stringify(topFive);
     } catch {
       // If not valid JSON, return empty list to avoid crashing the agent
@@ -380,43 +379,91 @@ async function fetchCompanyEmails(domain) {
 // -------------------- Personalized Email Curator --------------------
 const emailCuratorTool = new DynamicTool({
   name: "email_curator",
-  description: "Generate a personalized email given resume summary, company name, and description",
+  description: "Generate a personalized cold email using a fixed template with dynamic placeholders",
   func: async (input) => {
     const { resumeSummary, companyName, recipientName } = JSON.parse(input);
 
-    const prompt = `
-      You are writing a professional cold email.
-      - Resume Summary: ${resumeSummary}
-      - Company: ${companyName}
-      - Recipient: ${recipientName}
+    // Fixed template email
+    const emailTemplate = `
+Hi ${recipientName},
 
-      Write a concise email introducing myself and aligning my skills with their company.
-      Use recipient's name and company name dynamically.
+I hope this message finds you well. I am reaching out to express my interest in opportunities at ${companyName}. 
+
+Based on my background:
+${resumeSummary}
+
+I believe my skills and experience align closely with the work being done at ${companyName}, and I am confident I can contribute meaningfully to your team. 
+
+I would greatly appreciate the opportunity to connect and discuss how I could add value.  
+Looking forward to your response.
+
     `;
 
-    const response = await llm.invoke(prompt);
-    return response.content[0].text;
+    return emailTemplate.trim();
   },
 });
 
 // -------------------- Send Email --------------------
 const sendEmailTool = new DynamicTool({
   name: "send_email",
-  description: "Send emails to multiple recipients using Brevo",
+  description: "Send emails to one or more recipients using the authenticated Gmail account (OAuth2)",
   func: async (input) => {
-    const { fromEmail, toEmail, subject, body } = JSON.parse(input);
+    const { fromEmail, toEmail, subject, body, tokens } = JSON.parse(input);
 
-    const recipients = toEmail.map((email) => ({ email }));
+    if (!tokens) {
+      throw new Error("Missing Gmail OAuth tokens in tool input");
+    }
+    const oauth = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
+    );
+    oauth.setCredentials(tokens);
+    const gmail = google.gmail({ version: "v1", auth: oauth });
 
-    const sendSmtpEmail = {
-      sender: { email: fromEmail}, // Must be verified in Brevo
-      to: recipients,
-      subject,
-      htmlContent: `<p>${body}</p>`,
+    const makeRaw = (from, to, subj, html) => {
+      const boundary = "mixed-" + Math.random().toString(36).slice(2);
+      const message = [
+        `From: ${from}`,
+        `To: ${to}`,
+        `Subject: ${subj}`,
+        "MIME-Version: 1.0",
+        `Content-Type: multipart/alternative; boundary=${boundary}`,
+        "",
+        `--${boundary}`,
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        // Plain fallback by stripping tags
+        html.replace(/<[^>]+>/g, " ").trim(),
+        "",
+        `--${boundary}`,
+        "Content-Type: text/html; charset=utf-8",
+        "",
+        html,
+        "",
+        `--${boundary}--`,
+        "",
+      ].join("\r\n");
+      // Base64url encoding
+      return Buffer.from(message)
+        .toString("base64")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/g, "");
     };
 
-    const result = await brevoClient.sendTransacEmail(sendSmtpEmail);
-    return JSON.stringify({ success: true, messageId: result.messageId, recipients: toEmail });
+    const recipients = Array.isArray(toEmail) ? toEmail : [toEmail];
+    const sent = [];
+    for (const recipient of recipients) {
+      const raw = makeRaw(fromEmail, recipient, subject, `<p>${body}</p>`);
+      const resp = await gmail.users.messages.send({
+        userId: "me",
+        requestBody: { raw },
+      });
+      sent.push({ recipient, id: resp.data.id, threadId: resp.data.threadId });
+    }
+
+    return JSON.stringify({ success: true, sent });
   },
 });
 
@@ -519,17 +566,23 @@ router.get("/recent-companies", async (req, res) => {
         console.error("Failed to parse agent response:", err);
         return res.status(500).json({ error: "Failed to parse agent response" });
     }
-    // Return an array to match client expectations
-    //return res.status(200).json(startups);
+    // Enrich with emails so downstream /email has recipients
     const enriched = await Promise.all(
-      startups.map(async (s) => {
-        const emails = await fetchCompanyEmails(s.domain);
-        return { ...s, emails };
+      (Array.isArray(startups) ? startups : []).map(async (s) => {
+        try {
+          const emails = s?.domain ? await fetchCompanyEmails(s.domain) : [];
+          return { ...s, emails };
+        } catch (e) {
+          console.warn('Email enrichment failed for', s?.domain, e?.message || e);
+          return { ...s, emails: [] };
+        }
       })
     );
 
+    // Cache enriched list for /email endpoint
+    startups = enriched;
+    // Return array to match client expectations
     return res.status(200).json(enriched);
-
   } catch (err) {
     console.error("Agent B error:", err);
     return res.status(500).json({ error: err.message });
@@ -545,17 +598,30 @@ router.post('/email', requireEmailAuth(), async(req, res)=>{
       return res.status(400).json({ error: "No cached companies. Please call /recent_companies first." });
     }
 
+    console.log("Sending emails...");
     // Use the Gmail-connected user's email as sender
     const fromEmail = req.userEmail;
-
+    console.log("From email:", fromEmail);
     let results = [];
 
     for (const company of startups) {
+      // Ensure we have emails; fetch if missing
+      if (!company.emails || company.emails.length === 0) {
+        try {
+          const fetched = company.domain ? await fetchCompanyEmails(company.domain) : [];
+          company.emails = Array.isArray(fetched) ? fetched : [];
+        } catch (e) {
+          console.warn('Failed fetching emails for', company?.domain, e?.message || e);
+          company.emails = [];
+        }
+      }
       if (!company.emails || company.emails.length === 0) continue;
 
       // Use the first email as recipient name if name not available
       for (const toEmail of company.emails) {
         const recipientName = toEmail.split('@')[0]; // crude fallback, ideally use real name if available
+        console.log("To email:", toEmail);
+        console.log("Recipient name:", recipientName);
 
         // 1. Curate personalized email
         const emailContent = await agentB.invoke({
@@ -565,7 +631,11 @@ router.post('/email', requireEmailAuth(), async(req, res)=>{
                 "You must use the tool 'email_curator' with the EXACT argument provided below.",
                 "Do not fetch yourself. Call the tool and return ONLY the tool result.",
                 "",
-                `ARGUMENT: ${curated_resume, company.company, recipientName}`,
+                `ARGUMENT: ${JSON.stringify({
+                  resumeSummary: curated_resume,
+                  companyName: company.company,
+                  recipientName,
+                })}`,
               ].join("\n")
             )
           ]
@@ -575,14 +645,20 @@ router.post('/email', requireEmailAuth(), async(req, res)=>{
         // 2. Send email
         const subject = `Application for Opportunities at ${company.company}`;
 
-        const sendResult = await agentB.invoke({
+        await agentB.invoke({
           messages: [
             new HumanMessage(
               [
                 "You must use the tool 'send_email' with the EXACT argument provided below.",
                 "Do not fetch yourself. Call the tool and return ONLY the tool result.",
                 "",
-                `ARGUMENT: ${fromEmail, toEmail, subject, emailContent}`,
+                `ARGUMENT: ${JSON.stringify({
+                  fromEmail,
+                  toEmail: [toEmail],
+                  subject,
+                  body: typeof emailContent === 'string' ? emailContent : String(emailContent),
+                  tokens: req.gmailTokens,
+                })}`,
               ].join("\n")
             )
           ]
@@ -632,6 +708,7 @@ router.get("/auth/google", (req, res) => {
     prompt: 'consent',
     scope: [
       "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.send",
       "https://www.googleapis.com/auth/userinfo.email",
       "https://www.googleapis.com/auth/userinfo.profile"
     ],
