@@ -51,31 +51,48 @@ const oauth2Client = new google.auth.OAuth2(
 );
 
 
-function requireAuth(requiredScopes){
+function requireAuth(requiredScopes = []){
   return async (req, res, next) => {
     try {
       const auth = req.headers.authorization || '';
       const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
       if (!token) return res.status(401).json({ error: 'Missing bearer token' });
 
-      // Validate access or session token
-      const { token: claims } = await descope.validateSession(token);
+      // Validate either session (for web) or access JWT (for API)
+      let claims = null;
+      try {
+        const out = await descope.validateSession(token);
+        claims = out?.token || out; // SDK may return { token }
+      } catch (_) {
+        try {
+          claims = await descope.validateJwt(token);
+        } catch (e) {
+          return res.status(401).json({ error: 'Invalid or expired token' });
+        }
+      }
+
+      // Basic identity checks
+      if (!claims?.sub && !claims?.userId) {
+        return res.status(401).json({ error: 'Invalid token: missing subject' });
+      }
 
       // Scopes are space-separated in the "scope" claim (OAuth convention)
-      const scopes = (claims?.scope || '').split(' ').filter(Boolean);
-      const ok = requiredScopes.every(s => scopes.includes(s));
+      const scopeStr = claims?.scope || claims?.scp || '';
+      const scopes = String(scopeStr).split(/[\s,]+/).filter(Boolean);
+      const ok = requiredScopes.every((s) => scopes.includes(s));
       if (!ok) return res.status(403).json({ error: 'Insufficient scope' });
 
-      req.user = claims; // sub, email, roles, scope, etc.
+      req.user = claims; // subject, scope, etc.
       next();
-    } catch {
-      return res.status(401).json({ error: 'Invalid or expired token' });
+    } catch (e) {
+      console.error('Auth middleware error:', e);
+      return res.status(401).json({ error: 'Unauthorized' });
     }
   };
 }
 
 // Authorization middleware for email sending
-function requireEmailAuth() {
+function requireEmailAuth(requiredScopes = []) {
   return async (req, res, next) => {
     try {
       const auth = req.headers.authorization || '';
@@ -85,9 +102,9 @@ function requireEmailAuth() {
       // Validate token and get user
       let user = null;
       try {
-        const { token: claims } = await descope.validateSession(token);
-        user = claims;
-      } catch {
+        const out = await descope.validateSession(token);
+        user = out?.token || out;
+      } catch (_) {
         try {
           user = await descope.validateJwt(token);
         } catch {
@@ -95,7 +112,15 @@ function requireEmailAuth() {
         }
       }
 
-      if (!user?.sub) return res.status(401).json({ error: 'Invalid user token' });
+      if (!user?.sub && !user?.userId) return res.status(401).json({ error: 'Invalid user token' });
+
+      // Scope check for email endpoints
+      if (requiredScopes.length) {
+        const scopeStr = user?.scope || user?.scp || '';
+        const scopes = String(scopeStr).split(/[\s,]+/).filter(Boolean);
+        const ok = requiredScopes.every((s) => scopes.includes(s));
+        if (!ok) return res.status(403).json({ error: 'Insufficient scope' });
+      }
 
       // Check if user has connected Gmail
       const userId = user.sub;
@@ -417,73 +442,68 @@ Looking forward to your response.
   },
 });
 
-// -------------------- Send Email --------------------
-const sendEmailTool = new DynamicTool({
-  name: "send_email",
-  description: "Send emails to one or more recipients using the authenticated Gmail account (OAuth2)",
-  func: async (input) => {
-    const { fromEmail, toEmail, subject, body, tokens } = JSON.parse(input);
+// -------------------- Send Email (function) --------------------
+async function sendEmail({ fromEmail, toEmail, subject, body, tokens }) {
+  if (!tokens) {
+    throw new Error("Missing Gmail OAuth tokens in sendEmail");
+  }
+  const oauth = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_REDIRECT_URI
+  );
+  oauth.setCredentials(tokens);
+  const gmail = google.gmail({ version: "v1", auth: oauth });
 
-    if (!tokens) {
-      throw new Error("Missing Gmail OAuth tokens in tool input");
-    }
-    const oauth = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      process.env.GOOGLE_REDIRECT_URI
-    );
-    oauth.setCredentials(tokens);
-    const gmail = google.gmail({ version: "v1", auth: oauth });
+  const makeRaw = (from, to, subj, html) => {
+    const boundary = "mixed-" + Math.random().toString(36).slice(2);
+    const message = [
+      `From: ${from}`,
+      `To: ${to}`,
+      `Subject: ${subj}`,
+      "MIME-Version: 1.0",
+      `Content-Type: multipart/alternative; boundary=${boundary}`,
+      "",
+      `--${boundary}`,
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      // Plain fallback by stripping tags
+      html.replace(/<[^>]+>/g, " ").trim(),
+      "",
+      `--${boundary}`,
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      html,
+      "",
+      `--${boundary}--`,
+      "",
+    ].join("\r\n");
+    // Base64url encoding
+    return Buffer.from(message)
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+  };
+  console.log("sendEmail() called with", toEmail);
 
-    const makeRaw = (from, to, subj, html) => {
-      const boundary = "mixed-" + Math.random().toString(36).slice(2);
-      const message = [
-        `From: ${from}`,
-        `To: ${to}`,
-        `Subject: ${subj}`,
-        "MIME-Version: 1.0",
-        `Content-Type: multipart/alternative; boundary=${boundary}`,
-        "",
-        `--${boundary}`,
-        "Content-Type: text/plain; charset=utf-8",
-        "",
-        // Plain fallback by stripping tags
-        html.replace(/<[^>]+>/g, " ").trim(),
-        "",
-        `--${boundary}`,
-        "Content-Type: text/html; charset=utf-8",
-        "",
-        html,
-        "",
-        `--${boundary}--`,
-        "",
-      ].join("\r\n");
-      // Base64url encoding
-      return Buffer.from(message)
-        .toString("base64")
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=+$/g, "");
-    };
+  const recipients = Array.isArray(toEmail) ? toEmail : [toEmail];
+  const sent = [];
+  for (const recipient of recipients) {
+    const raw = makeRaw(fromEmail, recipient, subject, `<p>${body}</p>`);
+    const resp = await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw },
+    });
+    sent.push({ recipient, id: resp.data.id, threadId: resp.data.threadId });
+  }
 
-    const recipients = Array.isArray(toEmail) ? toEmail : [toEmail];
-    const sent = [];
-    for (const recipient of recipients) {
-      const raw = makeRaw(fromEmail, recipient, subject, `<p>${body}</p>`);
-      const resp = await gmail.users.messages.send({
-        userId: "me",
-        requestBody: { raw },
-      });
-      sent.push({ recipient, id: resp.data.id, threadId: resp.data.threadId });
-    }
-
-    return JSON.stringify({ success: true, sent });
-  },
-});
+  return { success: true, sent };
+}
 
 const agentB = createReactAgent({
   llm: llm,
-  tools: [fundedStartupsTool, emailCuratorTool, sendEmailTool],
+  tools: [fundedStartupsTool, emailCuratorTool],
   maxIterations: 3,
 });
 
@@ -503,7 +523,7 @@ const upload = multer({storage: storage})
 
 let curated_resume;
 
-router.post("/upload", upload.single("pdf"), async (req, res) => {
+router.post("/upload", requireAuth(), upload.single("pdf"), async (req, res) => {
   try {
     // console.log("File metadata:", req.file.filename);
 
@@ -556,7 +576,7 @@ router.post("/upload", upload.single("pdf"), async (req, res) => {
 
 let startups = [];
 
-router.get("/recent-companies", async (req, res) => {
+router.get("/recent-companies", requireAuth(), async (req, res) => {
   try {
     console.log("Fetching recent companies...");
     const url = "https://startups.gallery/news";
@@ -603,7 +623,7 @@ router.get("/recent-companies", async (req, res) => {
   }
 });
 
-router.post('/email', requireEmailAuth(), async(req, res)=>{
+router.post('/email', requireEmailAuth(["email:send"]), async(req, res)=>{
   try{
     if (!curated_resume) {
       return res.status(400).json({ error: "No resume summary found. Please call /summarize_resume first." });
@@ -656,27 +676,16 @@ router.post('/email', requireEmailAuth(), async(req, res)=>{
         });
         console.log(emailContent);
 
-        // 2. Send email
+        // 2. Send email (direct function call)
         const subject = `Application for Opportunities at ${company.company}`;
-
-        await agentB.invoke({
-          messages: [
-            new HumanMessage(
-              [
-                "You must use the tool 'send_email' with the EXACT argument provided below.",
-                "Do not fetch yourself. Call the tool and return ONLY the tool result.",
-                "",
-                `ARGUMENT: ${JSON.stringify({
-                  fromEmail,
-                  toEmail: [toEmail],
-                  subject,
-                  body: typeof emailContent === 'string' ? emailContent : String(emailContent),
-                  tokens: req.gmailTokens,
-                })}`,
-              ].join("\n")
-            )
-          ]
+        const sendResult = await sendEmail({
+          fromEmail,
+          toEmail: [toEmail],
+          subject,
+          body: typeof emailContent === 'string' ? emailContent : String(emailContent),
+          tokens: req.gmailTokens,
         });
+        console.log("Gmail send result:", sendResult);
 
         /*results.push({
           company: company.company,
@@ -741,6 +750,20 @@ router.get("/auth/status", (req, res) => {
   }
 });
 
+// Authenticated logout to clear Gmail association for this user
+router.post("/auth/logout", requireAuth(), async (req, res) => {
+  try {
+    const userId = req.user?.sub || req.user?.userId;
+    if (userId && gmailTokens[userId]) {
+      delete gmailTokens[userId];
+    }
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error("Logout error:", e);
+    return res.status(500).json({ error: "Failed to logout" });
+  }
+});
+
 // Callback from Google
 router.get("/api/auth/callback", async (req, res) => {
   try{
@@ -777,7 +800,7 @@ router.get("/api/auth/callback", async (req, res) => {
 });
 
 
-router.get("/get_emails", requireEmailAuth(), async (req, res) => {
+router.get("/get_emails", requireEmailAuth(["email:read"]), async (req, res) => {
   try {
     // Tokens already validated by requireEmailAuth()
     const tokens = req.gmailTokens;
@@ -806,9 +829,18 @@ router.get("/get_emails", requireEmailAuth(), async (req, res) => {
 
       // Step 2: run extraction tool directly for each message
       for (const msg of listRes.data.messages) {
-        const extracted = await emailContentExtractionTool.func(
-          JSON.stringify({ tokens, messageId: msg.id })
-        );
+        const extracted = await agentA.invoke({
+          messages: [
+            new HumanMessage(
+              [
+                "You must use the tool 'email_content_extraction' with the EXACT argument provided below.",
+                "Do not fetch yourself. Call the tool and return ONLY the tool result.",
+                "",
+                `ARGUMENT: ${JSON.stringify({ tokens, messageId: msg.id })}`,
+              ].join("\n")
+            )
+          ]
+        });
         matchedEmails.push(extracted);
       }
     }
@@ -818,7 +850,7 @@ router.get("/get_emails", requireEmailAuth(), async (req, res) => {
     for(const email of matchedEmails) {
       const { from, subject, body } = email;
       //const {summary, result} = await emailSummaryTool.func(JSON.stringify({ subject, body }));
-      const {summary, result} = await agentB.invoke({
+      const {summary, result} = await agentA.invoke({
         messages: [
           new HumanMessage(
             [

@@ -7,6 +7,7 @@ import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/component
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import { useRouter } from "next/navigation";
 
 type Company = {
   company: string;
@@ -17,6 +18,7 @@ type Company = {
 };
 
 const MainPage = () => {
+  const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(false);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -28,6 +30,33 @@ const MainPage = () => {
   const [emails, setEmails] = useState<Array<{ sender: string; summary: string; result: "accepted" | "pending" | "rejected" }>>([]);
   const [emailsLoading, setEmailsLoading] = useState(false);
   const [emailsError, setEmailsError] = useState<string | null>(null);
+  const [checkingAuth, setCheckingAuth] = useState(true);
+  const [authed, setAuthed] = useState(false);
+
+  // Client-side auth guard: require a token in localStorage; otherwise redirect to /sign-in
+  useEffect(() => {
+    try {
+      let token: string | null | undefined = undefined;
+      if (typeof window !== "undefined") {
+        token =
+          localStorage.getItem("DSR") ||
+          localStorage.getItem("DS") ||
+          localStorage.getItem("sessionToken") ||
+          localStorage.getItem("descopeSessionToken") ||
+          localStorage.getItem("descope-session") ||
+          localStorage.getItem("access_token") ||
+          localStorage.getItem("authToken");
+      }
+      if (!token) {
+        router.replace("/sign-in");
+        setAuthed(false);
+      } else {
+        setAuthed(true);
+      }
+    } finally {
+      setCheckingAuth(false);
+    }
+  }, [router]);
 
   const handleClick = () => inputRef.current?.click();
 
@@ -40,19 +69,44 @@ const MainPage = () => {
 
     setLoading(true);
     try {
+      // Read an access/session token from localStorage to authorize protected endpoints
+      let token: string | null | undefined = undefined;
+      if (typeof window !== "undefined") {
+        token =
+          localStorage.getItem("DSR") ||
+          localStorage.getItem("DS") ||
+          localStorage.getItem("sessionToken") ||
+          localStorage.getItem("descopeSessionToken") ||
+          localStorage.getItem("descope-session") ||
+          localStorage.getItem("access_token") ||
+          localStorage.getItem("authToken");
+      }
+
       const res = await fetch("http://localhost:5248/upload", {
         method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         body: form,
       });
-      if (!res.ok) throw new Error("Upload failed");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({} as any));
+        const msg = err?.error || `Upload failed (${res.status})`;
+        throw new Error(msg);
+      }
       const data = await res.json();
       // Minimal feedback
       alert("Uploaded. Summary ready.");
       console.log("Summary:", data);
 
       // Fetch recent companies after successful upload
-      const rec = await fetch("http://localhost:5248/recent-companies");
-      if (!rec.ok) throw new Error("Failed to fetch recent companies");
+      const rec = await fetch("http://localhost:5248/recent-companies", {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        credentials: "include",
+      });
+      if (!rec.ok) {
+        const err2 = await rec.json().catch(() => ({} as any));
+        const msg2 = err2?.error || `Failed to fetch recent companies (${rec.status})`;
+        throw new Error(msg2);
+      }
       const companiesJson = await rec.json();
       // Expecting array of {company, description, url, domain, emails}
       setCompanies(Array.isArray(companiesJson) ? companiesJson : []);
@@ -71,6 +125,54 @@ const MainPage = () => {
     } finally {
       setLoading(false);
       if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      // Read token
+      let token: string | null | undefined = undefined;
+      if (typeof window !== "undefined") {
+        token =
+          localStorage.getItem("DSR") ||
+          localStorage.getItem("DS") ||
+          localStorage.getItem("sessionToken") ||
+          localStorage.getItem("descopeSessionToken") ||
+          localStorage.getItem("descope-session") ||
+          localStorage.getItem("access_token") ||
+          localStorage.getItem("authToken");
+      }
+
+      // Best effort backend logout to drop Gmail association
+      if (token) {
+        try {
+          await fetch("http://localhost:5248/auth/logout", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` },
+            credentials: "include",
+          });
+        } catch {}
+      }
+
+      // Clear known token keys
+      if (typeof window !== "undefined") {
+        [
+          "DSR",
+          "DS",
+          "sessionToken",
+          "descopeSessionToken",
+          "descope-session",
+          "access_token",
+          "authToken",
+        ].forEach((k) => {
+          try { localStorage.removeItem(k); } catch {}
+        });
+      }
+
+      router.replace("/sign-in");
+    } catch (e) {
+      console.error("Logout error", e);
+      router.replace("/sign-in");
     }
   };
 
@@ -200,9 +302,24 @@ const MainPage = () => {
     }
   };
 
+  if (checkingAuth) {
+    return (
+      <div className="min-h-screen bg-black text-neutral-100 flex items-center justify-center p-6">
+        <div className="animate-pulse text-neutral-400">Checking authentication…</div>
+      </div>
+    );
+  }
+
+  if (!authed) {
+    return null; // redirected
+  }
+
   return (
     <div className="min-h-screen bg-black text-neutral-100 flex items-center justify-center p-6">
-      <div className="w-full max-w-md rounded-3xl border border-neutral-800 bg-neutral-900 p-6">
+      <div className="w-full max-w-md rounded-3xl border border-neutral-800 bg-neutral-900 p-6 relative">
+        <Button size="sm" variant="outline" className="absolute right-4 top-4" onClick={handleLogout}>
+          Logout
+        </Button>
         <div className="mb-4 text-sm text-neutral-400">Welcome</div>
 
         {/* Upload block with inline client logic (no new files) */}
