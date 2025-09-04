@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { MonitorUp, ExternalLink } from "lucide-react";
 import { HoverCard, HoverCardTrigger, HoverCardContent } from "@/components/ui/hover-card";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Badge } from "@/components/ui/badge";
 
 type Company = {
   company: string;
@@ -22,6 +23,11 @@ const MainPage = () => {
   const [gmailConnected, setGmailConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [sending, setSending] = useState(false);
+  // Chatbox state
+  const [chatOpen, setChatOpen] = useState(false);
+  const [emails, setEmails] = useState<Array<{ sender: string; summary: string; result: "accepted" | "pending" | "rejected" }>>([]);
+  const [emailsLoading, setEmailsLoading] = useState(false);
+  const [emailsError, setEmailsError] = useState<string | null>(null);
 
   const handleClick = () => inputRef.current?.click();
 
@@ -67,6 +73,46 @@ const MainPage = () => {
       if (inputRef.current) inputRef.current.value = "";
     }
   };
+
+  // Fetch replies when chat opens
+  useEffect(() => {
+    const fetchReplies = async () => {
+      if (!chatOpen) return;
+      setEmailsError(null);
+      setEmailsLoading(true);
+      try {
+        let token: string | null | undefined = undefined;
+        if (typeof window !== "undefined") {
+          token =
+            localStorage.getItem("DSR") ||
+            localStorage.getItem("DS") ||
+            localStorage.getItem("sessionToken") ||
+            localStorage.getItem("descopeSessionToken") ||
+            localStorage.getItem("descope-session") ||
+            localStorage.getItem("access_token") ||
+            localStorage.getItem("authToken");
+        }
+
+        const res = await fetch("http://localhost:5248/get_emails", {
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+          credentials: "include",
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: "Failed to fetch" }));
+          throw new Error(err.error || "Failed to fetch");
+        }
+        const data = await res.json();
+        if (Array.isArray(data)) setEmails(data);
+        else setEmails([]);
+      } catch (e) {
+        const msg = (e as Error)?.message || "Failed to fetch";
+        setEmailsError(msg);
+      } finally {
+        setEmailsLoading(false);
+      }
+    };
+    fetchReplies();
+  }, [chatOpen]);
 
   const handleConnectGmail = async () => {
     try {
@@ -263,6 +309,57 @@ const MainPage = () => {
             </>
           )}
         </div>
+      </div>
+
+      {/* Floating Replies Chatbox (bottom-right) */}
+      <div className="fixed bottom-4 right-4 z-50">
+        {/* Toggle Button */}
+        <Button onClick={() => setChatOpen((v) => !v)} variant="default" className="shadow-lg">
+          {chatOpen ? "Close Replies" : "Replies"}
+        </Button>
+
+        {/* Panel */}
+        {chatOpen && (
+          <div className="mt-2 w-80 rounded-xl border border-neutral-800 bg-neutral-900 shadow-2xl">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
+              <div className="font-semibold">Replies</div>
+              <Button size="sm" variant="ghost" onClick={() => setChatOpen(false)}>✕</Button>
+            </div>
+            <div className="p-3">
+              {emailsLoading ? (
+                <div className="text-sm text-neutral-400">Loading...</div>
+              ) : emailsError ? (
+                <div className="text-sm text-red-400">{emailsError}</div>
+              ) : emails.length === 0 ? (
+                <div className="text-sm text-neutral-400">No replies found.</div>
+              ) : (
+                <ScrollArea className="h-64 pr-2">
+                  <div className="space-y-3">
+                    {emails.map((m, i) => (
+                      <div key={i} className="rounded-lg border border-neutral-800 bg-neutral-950 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs text-neutral-400 truncate" title={m.sender}>{m.sender}</div>
+                          <Badge
+                            className={
+                              m.result === "accepted"
+                                ? "bg-green-600 text-white"
+                                : m.result === "pending"
+                                ? "bg-yellow-500 text-black"
+                                : "bg-red-600 text-white"
+                            }
+                          >
+                            {m.result}
+                          </Badge>
+                        </div>
+                        <div className="mt-2 text-sm text-neutral-100">{m.summary}</div>
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -194,7 +194,7 @@ ${content}`;
     try {
       const parsed = JSON.parse(out);
       // Ensure we only return the first 5 companies
-      const topFive = Array.isArray(parsed) ? parsed.slice(0, 2) : [];
+      const topFive = Array.isArray(parsed) ? parsed.slice(0, 5) : [];
       return JSON.stringify(topFive);
     } catch {
       // If not valid JSON, return empty list to avoid crashing the agent
@@ -208,9 +208,23 @@ const emailContentExtractionTool = new DynamicTool({
   name: "email_content_extraction",
   description: "Extract all information from email content from specified users",
   func: async (input) => {
-    const {auth, messageId} = JSON.parse(input);
+    // Accept either { tokens, messageId } or { messageId } if a global OAuth is desired
+    const { tokens, messageId } = JSON.parse(input);
 
-    const gmail = google.gmail({ version: "v1", auth });
+    if (!messageId) throw new Error("messageId is required");
+
+    let gmail;
+    if (tokens) {
+      const oauth = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_SECRET,
+        process.env.GOOGLE_REDIRECT_URI
+      );
+      oauth.setCredentials(tokens);
+      gmail = google.gmail({ version: "v1", auth: oauth });
+    } else {
+      throw new Error("Missing tokens for Gmail client");
+    }
 
     // Fetch full message
     const msgRes = await gmail.users.messages.get({
@@ -763,17 +777,17 @@ router.get("/api/auth/callback", async (req, res) => {
 });
 
 
-router.get("/get_emails", requireAuth(["access:agentA"]), async (req, res) => {
+router.get("/get_emails", requireEmailAuth(), async (req, res) => {
   try {
-    const userId = req.user.sub; // Descope user ID
-    const tokens = gmailTokens[userId];
-    if (!tokens) {
-      return res.status(401).json({ error: "User has not connected Gmail" });
-    }
-
-    // Init Gmail client with saved tokens
-    oauth2Client.setCredentials(tokens);
-    const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+    // Tokens already validated by requireEmailAuth()
+    const tokens = req.gmailTokens;
+    const oauth = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
+    );
+    oauth.setCredentials(tokens);
+    const gmail = google.gmail({ version: "v1", auth: oauth });
 
     // Target senders are the company emails you already pulled
     const targetSenders = startups.flatMap((s) => s.emails).filter(Boolean);
@@ -790,12 +804,11 @@ router.get("/get_emails", requireAuth(["access:agentA"]), async (req, res) => {
 
       if (!listRes.data.messages) continue;
 
-      // Step 2: run your extraction tool on each message
+      // Step 2: run extraction tool directly for each message
       for (const msg of listRes.data.messages) {
         const extracted = await emailContentExtractionTool.func(
-          JSON.stringify({ auth: oauth2Client, messageId: msg.id })
+          JSON.stringify({ tokens, messageId: msg.id })
         );
-
         matchedEmails.push(extracted);
       }
     }
@@ -804,7 +817,19 @@ router.get("/get_emails", requireAuth(["access:agentA"]), async (req, res) => {
 
     for(const email of matchedEmails) {
       const { from, subject, body } = email;
-      const {summary, result} = await emailSummaryTool.func(JSON.stringify({ subject, body }));
+      //const {summary, result} = await emailSummaryTool.func(JSON.stringify({ subject, body }));
+      const {summary, result} = await agentB.invoke({
+        messages: [
+          new HumanMessage(
+            [
+              "You must use the tool 'email_summary' with the EXACT argument provided below.",
+              "Do not summarize yourself. Call the tool and return ONLY the tool result.",
+              "",
+              `ARGUMENT: ${JSON.stringify({ subject, body })}`,
+            ].join("\n")
+          ),
+        ],
+      });
       answer.push({ sender: from, summary, result });
     }
 
