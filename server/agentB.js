@@ -715,7 +715,7 @@ router.get("/auth/google", (req, res) => {
     return res.status(500).json({
       error: "Missing Google OAuth env vars",
       missing,
-      hint: "Set these in server/.env. Example: GOOGLE_REDIRECT_URI=http://localhost:5248/api/auth/callback",
+      hint: "Set these in server/.env. Example: GOOGLE_REDIRECT_URI=https://localhost:5248/api/auth/callback",
     });
   }
 

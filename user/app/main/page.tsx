@@ -82,7 +82,7 @@ const MainPage = () => {
           localStorage.getItem("authToken");
       }
 
-      const res = await fetch("http://localhost:5248/upload", {
+      const res = await fetch("https://localhost:5248/upload", {
         method: "POST",
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         body: form,
@@ -98,7 +98,7 @@ const MainPage = () => {
       console.log("Summary:", data);
 
       // Fetch recent companies after successful upload
-      const rec = await fetch("http://localhost:5248/recent-companies", {
+      const rec = await fetch("https://localhost:5248/recent-companies", {
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         credentials: "include",
       });
@@ -113,7 +113,7 @@ const MainPage = () => {
 
       // Check current Gmail status
       try {
-        const st = await fetch("http://localhost:5248/auth/status");
+        const st = await fetch("https://localhost:5248/auth/status");
         if (st.ok) {
           const j = await st.json();
           setGmailConnected(Boolean(j?.connected));
@@ -146,7 +146,7 @@ const MainPage = () => {
       // Best effort backend logout to drop Gmail association
       if (token) {
         try {
-          await fetch("http://localhost:5248/auth/logout", {
+          await fetch("https://localhost:5248/auth/logout", {
             method: "POST",
             headers: { Authorization: `Bearer ${token}` },
             credentials: "include",
@@ -195,7 +195,7 @@ const MainPage = () => {
             localStorage.getItem("authToken");
         }
 
-        const res = await fetch("http://localhost:5248/get_emails", {
+        const res = await fetch("https://localhost:5248/get_emails", {
           headers: token ? { Authorization: `Bearer ${token}` } : undefined,
           credentials: "include",
         });
@@ -220,12 +220,12 @@ const MainPage = () => {
     try {
       setConnecting(true);
       // Open OAuth in a new tab
-      window.open("http://localhost:5248/auth/google", "_blank");
+      window.open("https://localhost:5248/auth/google", "_blank");
       // Poll status
       const started = Date.now();
       const interval = setInterval(async () => {
         try {
-          const r = await fetch("http://localhost:5248/auth/status");
+          const r = await fetch("https://localhost:5248/auth/status");
           if (r.ok) {
             const j = await r.json();
             if (j?.connected) {
@@ -272,7 +272,7 @@ const MainPage = () => {
         return;
       }
 
-      const res = await fetch("http://localhost:5248/email", {
+      const res = await fetch("https://localhost:5248/email", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         credentials: "include",
