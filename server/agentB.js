@@ -521,7 +521,8 @@ const storage = multer.diskStorage({
 
 const upload = multer({storage: storage})
 
-let curated_resume;
+//let curated_resume;
+const user_data = {};
 
 router.post("/upload", requireAuth(), upload.single("pdf"), async (req, res) => {
   try {
@@ -566,7 +567,12 @@ router.post("/upload", requireAuth(), upload.single("pdf"), async (req, res) => 
 
     //console.log(summary)
 
-    curated_resume = summary;
+    //curated_resume = summary;
+    
+    const userID =req.user.userId;
+    if (!userData[userID]) userData[userID] = {};
+    userData[userID].curated_resume = summary;
+    
     res.json({ summary });
   } catch (e) {
     console.error(e);
@@ -625,6 +631,10 @@ router.get("/recent-companies", requireAuth(), async (req, res) => {
 
 router.post('/email', requireEmailAuth(["email:send"]), async(req, res)=>{
   try{
+    const userID = req.user.userId;
+    const user = user_data[userID] || {};
+    const { curated_resume } = user;
+
     if (!curated_resume) {
       return res.status(400).json({ error: "No resume summary found. Please call /summarize_resume first." });
     }
