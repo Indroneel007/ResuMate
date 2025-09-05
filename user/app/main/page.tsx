@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { MonitorUp, ExternalLink } from "lucide-react";
+import { MonitorUp, ExternalLink, LogOut } from "lucide-react";
 import { HoverCard, HoverCardTrigger, HoverCardContent } from "@/components/ui/hover-card";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
@@ -359,10 +359,17 @@ const MainPage = () => {
 
   return (
     <div className="min-h-screen bg-black text-neutral-100 flex items-center justify-center p-6">
+      {/* Global fixed Logout button (top-right) */}
+      <Button
+        onClick={handleLogout}
+        size="sm"
+        className="fixed top-4 right-4 z-50 bg-red-600 hover:bg-red-500 border border-red-500 text-white shadow-lg shadow-red-900/30 rounded-full px-4 py-2 flex items-center gap-2"
+      >
+        <LogOut className="h-4 w-4" />
+        <span className="hidden sm:inline">Logout</span>
+      </Button>
+
       <div className="w-full max-w-md rounded-3xl border border-neutral-800 bg-neutral-900 p-6 relative">
-        <Button size="sm" variant="outline" className="absolute right-4 top-4" onClick={handleLogout}>
-          Logout
-        </Button>
         <div className="mb-4 text-sm text-neutral-400">Welcome</div>
 
         {/* Upload block with inline client logic (no new files) */}
