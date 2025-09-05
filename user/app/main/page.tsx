@@ -318,7 +318,17 @@ const MainPage = () => {
         console.log("Available localStorage keys:", Object.keys(localStorage));
         console.log("Found token:", token ? "Yes" : "No");
       }
-
+      // Call backend to send emails
+      const res = await fetchAuthed("http://localhost:5248/email", {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `Failed (${res.status})` }));
+        throw new Error(err?.error || `Failed to send emails (${res.status})`);
+      }
+      const data = await res.json().catch(() => ({} as any));
+      console.log("/email response:", data);
+      alert("Emails are being sent. Check your Gmail Sent folder.");
     } catch (e) {
       console.error(e);
       const errorMessage = (e as Error)?.message || "Failed to send emails";
