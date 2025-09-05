@@ -6,8 +6,8 @@ import DescopeClient from '@descope/node-sdk';
 //import multer from "multer";
 import AgentB from "./agentB.js";
 import bodyParser from "body-parser";
-import https from "https";
-import fs from "fs";
+//import https from "https";
+//import fs from "fs";
 dotenv.config();
 
 const app = express();
@@ -20,16 +20,20 @@ const descope = DescopeClient({
   projectId: process.env.DESCOPE_PROJECT_ID,
 })
 
-const options = {
+/*const options = {
   key: fs.readFileSync("./key.pem"),
   cert: fs.readFileSync("./cert.pem"),
-};
+};*/
 
 const PORT = process.env.PORT || 5248;
 
 const userGmailTokens = new Map();
 
-https.createServer(options, app).listen(PORT, () => {
+/*https.createServer(options, app).listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});*/
+
+app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
 

@@ -570,8 +570,8 @@ router.post("/upload", requireAuth(), upload.single("pdf"), async (req, res) => 
     //curated_resume = summary;
     
     const userID =req.user.userId;
-    if (!userData[userID]) userData[userID] = {};
-    userData[userID].curated_resume = summary;
+    if (!user_data[userID]) user_data[userID] = {};
+    user_data[userID].curated_resume = summary;
     
     res.json({ summary });
   } catch (e) {
@@ -629,7 +629,7 @@ router.get("/recent-companies", requireAuth(), async (req, res) => {
   }
 });
 
-router.post('/email', requireEmailAuth(["email:send"]), async(req, res)=>{
+router.post('/email', requireEmailAuth(), async(req, res)=>{
   try{
     const userID = req.user.userId;
     const user = user_data[userID] || {};
@@ -684,7 +684,41 @@ router.post('/email', requireEmailAuth(["email:send"]), async(req, res)=>{
             )
           ]
         });
-        console.log(emailContent);
+        console.log("Raw agent emailContent:", emailContent);
+
+        // Normalize agent response to a plain string
+        let emailText = "";
+        try {
+          const last = emailContent?.messages?.[emailContent.messages.length - 1];
+          if (last) {
+            if (typeof last.content === "string") {
+              emailText = last.content;
+            } else if (Array.isArray(last.content)) {
+              emailText = last.content
+                .map((p) => (typeof p === "string" ? p : (p?.text ?? "")))
+                .filter(Boolean)
+                .join("\n");
+            } else if (last?.text) {
+              emailText = last.text;
+            }
+          }
+        } catch {}
+
+        // Fallback: call tool directly if still empty
+        if (!emailText || !emailText.trim()) {
+          try {
+            emailText = await emailCuratorTool.invoke(
+              JSON.stringify({
+                resumeSummary: curated_resume,
+                companyName: company.company,
+                recipientName,
+              })
+            );
+          } catch (e) {
+            console.warn("email_curator fallback failed:", e?.message || e);
+            emailText = "";
+          }
+        }
 
         // 2. Send email (direct function call)
         const subject = `Application for Opportunities at ${company.company}`;
@@ -692,7 +726,7 @@ router.post('/email', requireEmailAuth(["email:send"]), async(req, res)=>{
           fromEmail,
           toEmail: [toEmail],
           subject,
-          body: typeof emailContent === 'string' ? emailContent : String(emailContent),
+          body: (emailText && emailText.trim()) ? emailText : `Hi ${recipientName},\n\nI am reaching out to express my interest in opportunities at ${company.company}.\n\n${curated_resume}\n\nThanks,\n${fromEmail}`,
           tokens: req.gmailTokens,
         });
         console.log("Gmail send result:", sendResult);
@@ -725,7 +759,7 @@ router.get("/auth/google", (req, res) => {
     return res.status(500).json({
       error: "Missing Google OAuth env vars",
       missing,
-      hint: "Set these in server/.env. Example: GOOGLE_REDIRECT_URI=https://localhost:5248/api/auth/callback",
+      hint: "Set these in server/.env. Example: GOOGLE_REDIRECT_URI=http://localhost:5248/api/auth/callback",
     });
   }
 
@@ -810,7 +844,7 @@ router.get("/api/auth/callback", async (req, res) => {
 });
 
 
-router.get("/get_emails", requireEmailAuth(["email:read"]), async (req, res) => {
+router.get("/get_emails", requireEmailAuth(), async (req, res) => {
   try {
     // Tokens already validated by requireEmailAuth()
     const tokens = req.gmailTokens;
