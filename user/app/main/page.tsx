@@ -50,8 +50,17 @@ const MainPage = () => {
       if (!token) {
         router.replace("/sign-in");
         setAuthed(false);
+        // Clear auth cookie so middleware blocks /main
+        if (typeof document !== "undefined") {
+          document.cookie = "auth=; Max-Age=0; path=/";
+        }
       } else {
         setAuthed(true);
+        // Set auth cookie so middleware allows /main
+        if (typeof document !== "undefined") {
+          // 7 days
+          document.cookie = "auth=1; Max-Age=" + 7 * 24 * 60 * 60 + "; path=/";
+        }
       }
     } finally {
       setCheckingAuth(false);
@@ -82,9 +91,8 @@ const MainPage = () => {
           localStorage.getItem("authToken");
       }
 
-      const res = await fetch("http://localhost:5248/upload", {
+      const res = await fetchAuthed("http://localhost:5248/upload", {
         method: "POST",
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         body: form,
       });
       if (!res.ok) {
@@ -98,8 +106,7 @@ const MainPage = () => {
       console.log("Summary:", data);
 
       // Fetch recent companies after successful upload
-      const rec = await fetch("http://localhost:5248/recent-companies", {
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      const rec = await fetchAuthed("http://localhost:5248/recent-companies", {
         credentials: "include",
       });
       if (!rec.ok) {
@@ -144,15 +151,12 @@ const MainPage = () => {
       }
 
       // Best effort backend logout to drop Gmail association
-      if (token) {
-        try {
-          await fetch("http://localhost:5248/auth/logout", {
-            method: "POST",
-            headers: { Authorization: `Bearer ${token}` },
-            credentials: "include",
-          });
-        } catch {}
-      }
+      try {
+        await fetchAuthed("http://localhost:5248/auth/logout", {
+          method: "POST",
+          credentials: "include",
+        });
+      } catch {}
 
       // Clear known token keys
       if (typeof window !== "undefined") {
@@ -168,6 +172,9 @@ const MainPage = () => {
           try { localStorage.removeItem(k); } catch {}
         });
       }
+
+      // Clear auth cookie so middleware blocks /main
+      try { document.cookie = "auth=; Max-Age=0; path=/"; } catch {}
 
       router.replace("/sign-in");
     } catch (e) {
@@ -195,8 +202,7 @@ const MainPage = () => {
             localStorage.getItem("authToken");
         }
 
-        const res = await fetch("http://localhost:5248/get_emails", {
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        const res = await fetchAuthed("http://localhost:5248/get_emails", {
           credentials: "include",
         });
         if (!res.ok) {
@@ -247,6 +253,52 @@ const MainPage = () => {
     }
   };
 
+  // Helper to call backend with session + refresh tokens and auto-update
+  const fetchAuthed = async (url: string, init?: RequestInit) => {
+    let session: string | null = null;
+    let refresh: string | null = null;
+    if (typeof window !== "undefined") {
+      session =
+        localStorage.getItem("DS") ||
+        localStorage.getItem("sessionToken") ||
+        localStorage.getItem("descopeSessionToken") ||
+        localStorage.getItem("authToken");
+      refresh =
+        localStorage.getItem("DSR") ||
+        localStorage.getItem("descopeRefreshToken") ||
+        localStorage.getItem("refreshToken");
+    }
+
+    const headers: Record<string, string> = {
+      ...(init?.headers as Record<string, string>),
+    };
+    // Always send an Authorization header. If no session is found, fall back to refresh token
+    if (session) {
+      headers["Authorization"] = `Bearer ${session}`;
+    } else if (refresh) {
+      headers["Authorization"] = `Bearer ${refresh}`;
+    }
+    if (refresh) headers["X-Refresh-Token"] = refresh;
+
+    const res = await fetch(url, { ...init, headers });
+
+    if (res.status === 401) {
+      // redirect to sign-in on auth failure
+      router.replace("/sign-in");
+      return res;
+    }
+
+    const newSession = res.headers.get("X-New-Session");
+    if (newSession && typeof window !== "undefined") {
+      // store under primary session key
+      try { localStorage.setItem("DS", newSession); } catch {}
+      // ensure auth cookie is present for middleware
+      try { document.cookie = "auth=1; Max-Age=" + 7 * 24 * 60 * 60 + "; path=/"; } catch {}
+    }
+
+    return res;
+  };
+
   const handleSendEmails = async () => {
     try {
       setSending(true);
@@ -267,25 +319,6 @@ const MainPage = () => {
         console.log("Found token:", token ? "Yes" : "No");
       }
 
-      if (!token) {
-        alert("Please sign in first to send emails. Check browser console for available tokens.");
-        return;
-      }
-
-      const res = await fetch("http://localhost:5248/email", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        credentials: "include",
-      });
-      
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({ error: "Unknown error" }));
-        throw new Error(errorData.error || "Send failed");
-      }
-      
-      const j = await res.json();
-      alert("Emails sent");
-      console.log(j);
     } catch (e) {
       console.error(e);
       const errorMessage = (e as Error)?.message || "Failed to send emails";

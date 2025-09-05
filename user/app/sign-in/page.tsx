@@ -6,7 +6,7 @@ const SignInPage: React.FC = () => {
   return (
     <Descope
         flowId="sign-up-or-in"
-		redirectAfterSuccess="/main"
+		redirectAfterSuccess="/post-auth"
         redirectAfterError="/sign-in?error=1"
     />
   )

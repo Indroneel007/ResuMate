@@ -67,7 +67,20 @@ function requireAuth(requiredScopes = []){
         try {
           claims = await descope.validateJwt(token);
         } catch (e) {
-          return res.status(401).json({ error: 'Invalid or expired token' });
+          // Attempt refresh via refresh token header
+          const rt = req.headers['x-refresh-token'];
+          if (rt && typeof rt === 'string') {
+            try {
+              const refreshed = await descope.validateJwt(rt);
+              claims = refreshed?.token || refreshed;
+              // let client update its stored token (we can't mint a new session here)
+              res.setHeader('X-New-Session', rt);
+            } catch (e2) {
+              return res.status(401).json({ error: 'Invalid or expired token' });
+            }
+          } else {
+            return res.status(401).json({ error: 'Invalid or expired token' });
+          }
         }
       }
 
@@ -108,7 +121,19 @@ function requireEmailAuth(requiredScopes = []) {
         try {
           user = await descope.validateJwt(token);
         } catch {
-          return res.status(401).json({ error: 'Invalid or expired token' });
+          // Try refresh token if provided
+          const rt = req.headers['x-refresh-token'];
+          if (rt && typeof rt === 'string') {
+            try {
+              const refreshed = await descope.validateJwt(rt);
+              user = refreshed?.token || refreshed;
+              res.setHeader('X-New-Session', rt);
+            } catch {
+              return res.status(401).json({ error: 'Invalid or expired token' });
+            }
+          } else {
+            return res.status(401).json({ error: 'Invalid or expired token' });
+          }
         }
       }
 
