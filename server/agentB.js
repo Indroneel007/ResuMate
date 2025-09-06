@@ -557,7 +557,7 @@ router.post("/upload", requireAuth(), upload.single("pdf"), async (req, res) => 
     // console.log("File Uploaded now going to summarize", filePath);
 
     let summary = "";
-    try {
+    /*try {
       // Try via agent first
       const result = await agentA.invoke({
         messages: [
@@ -584,11 +584,11 @@ router.post("/upload", requireAuth(), upload.single("pdf"), async (req, res) => 
     } catch (agentErr) {
       // If agent fails (e.g., model lacks tool support), fall back to direct tool
       console.warn("Agent failed; falling back to tool:", agentErr?.message || agentErr);
-    }
+    }*/
 
-    if (!summary || !summary.trim()) {
+    //if (!summary || !summary.trim()) {
       summary = await resumeSummarizerTool.invoke(filePath);
-    }
+    //}
 
     //console.log(summary)
 
@@ -611,22 +611,11 @@ router.get("/recent-companies", requireAuth(), async (req, res) => {
   try {
     console.log("Fetching recent companies...");
     const url = "https://startups.gallery/news";
-    const response = await agentB.invoke({
-        messages: [
-          new HumanMessage(
-            [
-              "You must use the tool 'fetch_funded_startups' with the EXACT argument provided below.",
-              "Do not fetch yourself. Call the tool and return ONLY the tool result.",
-              "",
-              `ARGUMENT: ${url}`,
-            ].join("\n")
-          )
-        ]
-    });
+    const response = await fundedStartupsTool.invoke(url);
 
-   // console.log("Agent B response:", response.messages[response.messages.length - 1].content);
+    console.log("Funded startups tool response:", response);
     try{
-      startups = JSON.parse(response.messages[response.messages.length - 1].content);
+      startups = JSON.parse(response);
       } catch (err) {
         console.error("Failed to parse agent response:", err);
         return res.status(500).json({ error: "Failed to parse agent response" });
@@ -898,18 +887,7 @@ router.get("/get_emails", requireEmailAuth(), async (req, res) => {
 
       // Step 2: run extraction tool directly for each message
       for (const msg of listRes.data.messages) {
-        const extracted = await agentA.invoke({
-          messages: [
-            new HumanMessage(
-              [
-                "You must use the tool 'email_content_extraction' with the EXACT argument provided below.",
-                "Do not fetch yourself. Call the tool and return ONLY the tool result.",
-                "",
-                `ARGUMENT: ${JSON.stringify({ tokens, messageId: msg.id })}`,
-              ].join("\n")
-            )
-          ]
-        });
+        const extracted = await emailContentExtractionTool.invoke(JSON.stringify({ tokens, messageId: msg.id }));
         matchedEmails.push(extracted);
       }
     }
@@ -918,19 +896,7 @@ router.get("/get_emails", requireEmailAuth(), async (req, res) => {
 
     for(const email of matchedEmails) {
       const { from, subject, body } = email;
-      //const {summary, result} = await emailSummaryTool.func(JSON.stringify({ subject, body }));
-      const {summary, result} = await agentA.invoke({
-        messages: [
-          new HumanMessage(
-            [
-              "You must use the tool 'email_summary' with the EXACT argument provided below.",
-              "Do not summarize yourself. Call the tool and return ONLY the tool result.",
-              "",
-              `ARGUMENT: ${JSON.stringify({ subject, body })}`,
-            ].join("\n")
-          ),
-        ],
-      });
+      const {summary, result} = await emailSummaryTool.func(JSON.stringify({ subject, body }));
       answer.push({ sender: from, summary, result });
     }
 
