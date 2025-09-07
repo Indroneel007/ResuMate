@@ -137,7 +137,7 @@ Notes:
 - Email & Data: Google Gmail API (OAuth2), Hunter.io (contacts), Brevo (transactional emails)
 
 ## Demo Video
-- Link: <add your demo video link here>
+- Link: https://youtu.be/6eUv61Lc-OQ
 
 ## What I’d Do with More Time
 - Add robust error handling, retries, and rate limiting across external APIs.
