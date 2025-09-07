@@ -12,8 +12,14 @@ AI-powered resume-to-outreach assistant. Upload a resume PDF, get a concise summ
 
 
 ## What I Built
-- ResuMate streamlines job outreach:
-User uploads resume -> Agent A summarizes resume -> Agent A forwards the summary to Agent B -> Agent B scrapes and fetches recent funded companies and their CEO, CTO, HR emails -> Agent B sends personalized email -> Email responses are fetched from user gmail and then forwarded to Agent A for summarization -> Agent A summarizes the email response to one-liner and categorizes the response between Accepted, Pending and Rejected.
+- ResuMate streamlines job outreach using a secure multi-agent architecture:
+User uploads resume -> Agent A (Resume Processing) summarizes resume -> Agent B (Company Research) fetches recent funded companies and their CEO, CTO, HR emails -> Agent B requests resume summary from Agent A via secure API -> Agent B sends personalized emails -> Agent B fetches email responses and forwards to Agent A for analysis -> Agent A extracts and categorizes responses (Accepted, Pending, Rejected) -> Results returned to user.
+
+### Agent Architecture
+- **Agent A (Port 5249)**: Resume processing, email analysis, and response classification
+- **Agent B (Port 5248)**: Company research, email outreach, and Gmail integration
+- **Security**: Inter-agent communication secured with API keys
+- **Scalability**: Agents can be scaled independently
 
 ![ResuMate Flow](./ResuMail.png)
 
@@ -101,13 +107,23 @@ Troubleshooting:
 - If sending emails fails with token errors, re-run “Connect to Gmail” to refresh tokens.
 - Make sure the account you’re using is added as a Test User in the OAuth consent screen when in External/testing mode.
 
-2) Start the Backend (Express)
+2) Start the Backend (Multi-Agent System)
 
 ```
 cd server
 npm install
-node index.js
-# Server runs on http://localhost:5248
+npm start
+# Agent B (Main Server) runs on http://localhost:5248
+# Agent A (Resume Processing) runs on http://localhost:5249
+```
+
+**Alternative - Run agents separately:**
+```
+# Terminal 1 - Agent A
+npm run agent-a
+
+# Terminal 2 - Agent B  
+npm run agent-b
 ```
 
 3) Start the Frontend (Next.js)

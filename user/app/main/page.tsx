@@ -91,7 +91,7 @@ const MainPage = () => {
           localStorage.getItem("authToken");
       }
 
-      const res = await fetchAuthed("http://localhost:5248/upload", {
+      const res = await fetchAuthed("http://localhost:5248/agent-a/process-resume", {
         method: "POST",
         body: form,
       });

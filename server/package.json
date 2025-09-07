@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "agent-a": "node -e \"import('./agentA.js').then(m => { const express = require('express'); const app = express(); app.use('/', m.default); app.listen(5249, () => console.log('Agent A running on 5249')); })\"",
+    "agent-b": "node -e \"import('./agentB.js').then(m => { const express = require('express'); const app = express(); app.use('/', m.default); app.listen(5248, () => console.log('Agent B running on 5248')); })\""
   },
   "author": "",
   "license": "ISC",

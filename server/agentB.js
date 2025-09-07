@@ -9,10 +9,10 @@ import path from "path";
 import fs from "fs";
 import { google } from "googleapis";
 import DescopeClient from "@descope/node-sdk";
-import multer from "multer";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import {chromium} from "playwright";
+import crypto from "crypto";
 
 dotenv.config();
 
@@ -32,14 +32,14 @@ brevoClient.setApiKey(
 )
 
 const llm = new ChatOpenAI({
-  apiKey: process.env.OPENROUTER_API_KEY, // your OpenRouter key (sk-or-v...)
-  model: "moonshotai/kimi-k2:free",     // <-- use the correct slug from OpenRouter
+  apiKey: process.env.OPENROUTER_API_KEY,
+  model: "moonshotai/kimi-k2:free",
   temperature: 0,
   configuration: {
-    baseURL: "https://openrouter.ai/api/v1",  // point to OpenRouter
+    baseURL: "https://openrouter.ai/api/v1",
     defaultHeaders: {
-      "HTTP-Referer": "http://localhost:5248", // your app URL or domain
-      "X-Title": "ResuMate"
+      "HTTP-Referer": "http://localhost:5248",
+      "X-Title": "ResuMate-AgentB"
     }
   }
 });
@@ -58,22 +58,19 @@ function requireAuth(requiredScopes = []){
       const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
       if (!token) return res.status(401).json({ error: 'Missing bearer token' });
 
-      // Validate either session (for web) or access JWT (for API)
       let claims = null;
       try {
         const out = await descope.validateSession(token);
-        claims = out?.token || out; // SDK may return { token }
+        claims = out?.token || out;
       } catch (_) {
         try {
           claims = await descope.validateJwt(token);
         } catch (e) {
-          // Attempt refresh via refresh token header
           const rt = req.headers['x-refresh-token'];
           if (rt && typeof rt === 'string') {
             try {
               const refreshed = await descope.validateJwt(rt);
               claims = refreshed?.token || refreshed;
-              // let client update its stored token (we can't mint a new session here)
               res.setHeader('X-New-Session', rt);
             } catch (e2) {
               return res.status(401).json({ error: 'Invalid or expired token' });
@@ -84,24 +81,83 @@ function requireAuth(requiredScopes = []){
         }
       }
 
-      // Basic identity checks
       if (!claims?.sub && !claims?.userId) {
         return res.status(401).json({ error: 'Invalid token: missing subject' });
       }
 
-      // Scopes are space-separated in the "scope" claim (OAuth convention)
       const scopeStr = claims?.scope || claims?.scp || '';
       const scopes = String(scopeStr).split(/[\s,]+/).filter(Boolean);
       const ok = requiredScopes.every((s) => scopes.includes(s));
       if (!ok) return res.status(403).json({ error: 'Insufficient scope' });
 
-      req.user = claims; // subject, scope, etc.
+      req.user = claims;
       next();
     } catch (e) {
       console.error('Auth middleware error:', e);
       return res.status(401).json({ error: 'Unauthorized' });
     }
   };
+}
+
+// Inter-agent authentication middleware using Descope roles
+function requireAgentAuth(req, res, next) {
+  return requireAuth()(req, res, (err) => {
+    if (err) return next(err);
+    
+    // Check if user has agent-a or agent-b role for inter-agent communication
+    const userRoles = req.user?.roles || [];
+    const hasAgentRole = userRoles.includes('agent-a') || userRoles.includes('agent-b');
+    
+    if (!hasAgentRole) {
+      return res.status(403).json({ 
+        error: 'Insufficient permissions. Agent role required.',
+        requiredRoles: ['agent-a', 'agent-b'],
+        userRoles: userRoles 
+      });
+    }
+    
+    next();
+  });
+}
+
+// Helper function to call Agent A using Descope token
+async function callAgentA(endpoint, data = null, method = 'GET', userToken = null) {
+  const baseUrl = process.env.AGENT_A_URL || 'http://localhost:5249';
+  const url = `${baseUrl}${endpoint}`;
+  
+  console.log(`Calling Agent A: ${method} ${url}`);
+  
+  if (!userToken) {
+    throw new Error('User token required for inter-agent communication');
+  }
+  
+  const options = {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${userToken}`
+    }
+  };
+  
+  if (data && method !== 'GET') {
+    options.body = JSON.stringify(data);
+  }
+  
+  try {
+    const response = await fetch(url, options);
+    console.log(`Agent A response status: ${response.status}`);
+    
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unknown error');
+      console.error(`Agent A error response: ${errorText}`);
+      throw new Error(`Agent A call failed: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+    
+    return response.json();
+  } catch (error) {
+    console.error(`Agent A call error:`, error);
+    throw error;
+  }
 }
 
 // Authorization middleware for email sending
@@ -253,157 +309,6 @@ ${content}`;
   },
 });
 
-// --------------------- Email Content Extraction Tool -----------------------------------
-const emailContentExtractionTool = new DynamicTool({
-  name: "email_content_extraction",
-  description: "Extract all information from email content from specified users",
-  func: async (input) => {
-    // Accept either { tokens, messageId } or { messageId } if a global OAuth is desired
-    const { tokens, messageId } = JSON.parse(input);
-
-    if (!messageId) throw new Error("messageId is required");
-
-    let gmail;
-    if (tokens) {
-      const oauth = new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET,
-        process.env.GOOGLE_REDIRECT_URI
-      );
-      oauth.setCredentials(tokens);
-      gmail = google.gmail({ version: "v1", auth: oauth });
-    } else {
-      throw new Error("Missing tokens for Gmail client");
-    }
-
-    // Fetch full message
-    const msgRes = await gmail.users.messages.get({
-      userId: "me",
-      id: messageId,
-      format: "full",
-    });
-
-    const msg = msgRes.data;
-
-    // Extract headers
-    const headers = msg.payload.headers;
-    const getHeader = (name) => {
-      const header = headers.find((h) => h.name.toLowerCase() === name.toLowerCase());
-      return header ? header.value : null;
-    };
-
-    // Extract snippet (preview text)
-    const snippet = msg.snippet;
-
-    // Extract body (plain text if available)
-    let body = "";
-    if (msg.payload.parts) {
-      // Multi-part email (text/plain, text/html, etc.)
-      const plainPart = msg.payload.parts.find((p) => p.mimeType === "text/plain");
-      if (plainPart && plainPart.body.data) {
-        body = Buffer.from(plainPart.body.data, "base64").toString("utf-8");
-      } else {
-        // fallback: use first available part
-        body = Buffer.from(msg.payload.parts[0].body.data, "base64").toString("utf-8");
-      }
-    } else if (msg.payload.body && msg.payload.body.data) {
-      // Single-part email
-      body = Buffer.from(msg.payload.body.data, "base64").toString("utf-8");
-    }
-
-    // Final clean JSON
-    return {
-      id: msg.id,
-      threadId: msg.threadId,
-      from: getHeader("From"),
-      to: getHeader("To"),
-      subject: getHeader("Subject"),
-      date: getHeader("Date"),
-      snippet: snippet,
-      body: body.trim(),
-    };
-  },
-});
-
-// --------------------- Email Summary Tool --------------------
-const emailSummaryTool = new DynamicTool({
-  name: "email_summary",
-  description: "Summarize email content into one liner with result",
-  func: async (input) => {
-    const { subject, body } = JSON.parse(input);
-
-    const prompt = `
-      You are an assistant that classifies emails about job applications.
-      The email content is below.
-      Return a JSON with:
-      - "summary": a 1-line plain English summary of the email
-      - "result": one of [
-        "accepted" :- If the candidate is qualified for the job,
-        "pending" :- If the application is under review or further interview processes are scheduled,
-        "rejected" :- If the candidate is not a fit or there was no opening at the moment
-      ]
-
-      Email Subject: ${subject}
-      Email Body: ${body}
-    `;
-
-    const response = await llm.invoke(prompt);
-    
-    let parsed;
-    
-    try {
-      parsed = JSON.parse(response.content);
-    } catch (e) {
-      parsed = { summary: "Could not parse", result: "pending" };
-    }
-
-    return parsed;
-  },
-});
-
-// --------------------- Resume Summarizer Tool --------------------
-const resumeSummarizerTool = new DynamicTool({
-  name: "resume_summarizer",
-  description: "Summarize resumes into 5 bullet points highlighting experience & skills",
-  func: async (filePath) => {
-    // Lazy import avoids module side effects at startup
-    const { default: pdf } = await import("pdf-parse");
-    const dataBuffer = fs.readFileSync(filePath);
-    const pdfData = await pdf(dataBuffer);
-    const resumeText = pdfData.text || "";
-
-    const prompt = `Summarize the following resume in 5 concise bullet points highlighting experience and skills.
-
-${resumeText.substring(0, 12000)}`;
-
-    const response = await llm.invoke(prompt);
-
-    // Robust normalization across SDK versions/providers
-    let out = "";
-    if (typeof response?.content === "string") {
-      out = response.content;
-    } else if (Array.isArray(response?.content)) {
-      out = response.content
-        .map((p) => (typeof p === "string" ? p : (p?.text ?? "")))
-        .filter(Boolean)
-        .join("\n");
-    } else if (response?.text) {
-      out = response.text;
-    } else {
-      out = String(response ?? "");
-    }
-
-    fs.unlinkSync(filePath);
-    return out.trim();
-  },
-});
-
-
-const agentA = createReactAgent({
-  llm: llm,
-  tools: [resumeSummarizerTool, emailContentExtractionTool, emailSummaryTool],
-  maxIterations: 3,
-});
 
 const buildTicketPrompt = (searchData) => `
 Generate a JSON array with properties:
@@ -532,78 +437,8 @@ const agentB = createReactAgent({
   maxIterations: 3,
 });
 
-// ---------------------------- File Upload ---------------------------------
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-      cb(null, 'uploads/')
-  },
-  filename: function (req, file, cb) {
-      console.log(file)
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
-      cb(null, `${uniqueSuffix}-${file.originalname}`)
-  }
-})
-
-const upload = multer({storage: storage})
-
-//let curated_resume;
+// Store company data
 const user_data = {};
-
-router.post("/upload", requireAuth(), upload.single("pdf"), async (req, res) => {
-  try {
-    // console.log("File metadata:", req.file.filename);
-
-    const filePath = path.join(__dirname, "uploads", req.file.filename);
-    // console.log("File Uploaded now going to summarize", filePath);
-
-    let summary = "";
-    /*try {
-      // Try via agent first
-      const result = await agentA.invoke({
-        messages: [
-          new HumanMessage(
-            [
-              "You must use the tool 'resume_summarizer' with the EXACT argument provided below.",
-              "Do not summarize yourself. Call the tool and return ONLY the tool result.",
-              "",
-              `ARGUMENT: ${filePath}`,
-            ].join("\n")
-          ),
-        ],
-      });
-
-      const last = result?.messages?.[result.messages.length - 1];
-      if (last) {
-        summary = Array.isArray(last.content)
-          ? last.content
-              .map((p) => (typeof p === "string" ? p : p?.text ?? ""))
-              .filter(Boolean)
-              .join("\n")
-          : last.content ?? "";
-      }
-    } catch (agentErr) {
-      // If agent fails (e.g., model lacks tool support), fall back to direct tool
-      console.warn("Agent failed; falling back to tool:", agentErr?.message || agentErr);
-    }*/
-
-    //if (!summary || !summary.trim()) {
-      summary = await resumeSummarizerTool.invoke(filePath);
-    //}
-
-    //console.log(summary)
-
-    //curated_resume = summary;
-    
-    const userID =req.user.userId;
-    if (!user_data[userID]) user_data[userID] = {};
-    user_data[userID].curated_resume = summary;
-    
-    res.json({ summary });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to summarize resume" });
-  }
-});
 
 let startups = [];
 
@@ -646,24 +481,35 @@ router.get("/recent-companies", requireAuth(), async (req, res) => {
 router.post('/email', requireEmailAuth(), async(req, res)=>{
   try{
     const userID = req.user.userId;
-    const user = user_data[userID] || {};
-    const { curated_resume } = user;
-
-    if (!curated_resume) {
-      return res.status(400).json({ error: "No resume summary found. Please call /summarize_resume first." });
+    
+    // Extract the actual token from Authorization header
+    const authHeader = req.headers.authorization || '';
+    const userToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    
+    if (!userToken) {
+      return res.status(401).json({ error: "No authentication token found" });
     }
+    
+    // Get resume summary from Agent A
+    let resumeData;
+    try {
+      resumeData = await callAgentA(`/resume-summary/${userID}`, null, 'GET', userToken);
+    } catch (e) {
+      console.error('Error calling Agent A:', e);
+      return res.status(400).json({ error: "No resume summary found. Please upload resume first." });
+    }
+    
+    const curated_resume = resumeData.summary;
+
     if (!startups || startups.length === 0) {
       return res.status(400).json({ error: "No cached companies. Please call /recent_companies first." });
     }
 
     console.log("Sending emails...");
-    // Use the Gmail-connected user's email as sender
     const fromEmail = req.userEmail;
     console.log("From email:", fromEmail);
-    let results = [];
 
     for (const company of startups) {
-      // Ensure we have emails; fetch if missing
       if (!company.emails || company.emails.length === 0) {
         try {
           const fetched = company.domain ? await fetchCompanyEmails(company.domain) : [];
@@ -675,13 +521,11 @@ router.post('/email', requireEmailAuth(), async(req, res)=>{
       }
       if (!company.emails || company.emails.length === 0) continue;
 
-      // Use the first email as recipient name if name not available
       for (const toEmail of company.emails) {
-        const recipientName = toEmail.split('@')[0]; // crude fallback, ideally use real name if available
+        const recipientName = toEmail.split('@')[0];
         console.log("To email:", toEmail);
         console.log("Recipient name:", recipientName);
 
-        // 1. Curate personalized email
         const emailContent = await agentB.invoke({
           messages: [
             new HumanMessage(
@@ -698,9 +542,7 @@ router.post('/email', requireEmailAuth(), async(req, res)=>{
             )
           ]
         });
-        console.log("Raw agent emailContent:", emailContent);
 
-        // Normalize agent response to a plain string
         let emailText = "";
         try {
           const last = emailContent?.messages?.[emailContent.messages.length - 1];
@@ -718,7 +560,6 @@ router.post('/email', requireEmailAuth(), async(req, res)=>{
           }
         } catch {}
 
-        // Fallback: call tool directly if still empty
         if (!emailText || !emailText.trim()) {
           try {
             emailText = await emailCuratorTool.invoke(
@@ -734,7 +575,6 @@ router.post('/email', requireEmailAuth(), async(req, res)=>{
           }
         }
 
-        // 2. Send email (direct function call)
         const subject = `Application for Opportunities at ${company.company}`;
         const sendResult = await sendEmail({
           fromEmail,
@@ -744,12 +584,6 @@ router.post('/email', requireEmailAuth(), async(req, res)=>{
           tokens: req.gmailTokens,
         });
         console.log("Gmail send result:", sendResult);
-
-        /*results.push({
-          company: company.company,
-          toEmail,
-          sendResult: JSON.parse(sendResult)
-        });*/
       }
     }
 
@@ -860,7 +694,6 @@ router.get("/api/auth/callback", async (req, res) => {
 
 router.get("/get_emails", requireEmailAuth(), async (req, res) => {
   try {
-    // Tokens already validated by requireEmailAuth()
     const tokens = req.gmailTokens;
     const oauth = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
@@ -870,41 +703,50 @@ router.get("/get_emails", requireEmailAuth(), async (req, res) => {
     oauth.setCredentials(tokens);
     const gmail = google.gmail({ version: "v1", auth: oauth });
 
-    // Target senders are the company emails you already pulled
     const targetSenders = startups.flatMap((s) => s.emails).filter(Boolean);
-
-    let matchedEmails = [];
+    let messageIds = [];
 
     for (const sender of targetSenders) {
-      // Step 1: list last email from this sender
       const listRes = await gmail.users.messages.list({
         userId: "me",
         q: `from:${sender}`,
         maxResults: 1,
       });
 
-      if (!listRes.data.messages) continue;
-
-      // Step 2: run extraction tool directly for each message
-      for (const msg of listRes.data.messages) {
-        const extracted = await emailContentExtractionTool.invoke(JSON.stringify({ tokens, messageId: msg.id }));
-        matchedEmails.push(extracted);
+      if (listRes.data.messages) {
+        messageIds.push(...listRes.data.messages.map(msg => msg.id));
       }
     }
 
-    let answer = []; //answer: {sender, summary, result}
+    // Call Agent A to extract and analyze emails
+    const extractedData = await callAgentA('/extract-email-content', {
+      tokens,
+      messageIds
+    }, 'POST', req.user.token);
 
-    for(const email of matchedEmails) {
-      const { from, subject, body } = email;
-      const {summary, result} = await emailSummaryTool.func(JSON.stringify({ subject, body }));
-      answer.push({ sender: from, summary, result });
-    }
+    const analysisData = await callAgentA('/analyze-emails', {
+      emails: extractedData.emails
+    }, 'POST', req.user.token);
 
-    res.json(answer);
+    res.json(analysisData.analyses);
   } catch (e) {
     console.error("Error fetching emails:", e);
     res.status(500).json({ error: "Failed to fetch emails" });
   }
+});
+
+// Health check endpoint
+router.get("/health", (req, res) => {
+  res.json({ 
+    status: "healthy", 
+    agent: "B", 
+    capabilities: ["company_research", "email_sending", "startup_discovery"] 
+  });
+});
+
+// Get API key for inter-agent communication (Admin endpoint)
+router.get("/api-key", requireAuth(['admin']), (req, res) => {
+  res.json({ apiKey: null });
 });
 
 export default router;

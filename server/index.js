@@ -2,12 +2,10 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import DescopeClient from '@descope/node-sdk';
-//const Descope = require("@descope/node-sdk");
-//import multer from "multer";
+import AgentA from "./agentA.js";
 import AgentB from "./agentB.js";
 import bodyParser from "body-parser";
-//import https from "https";
-//import fs from "fs";
+
 dotenv.config();
 
 const app = express();
@@ -18,24 +16,43 @@ app.use(bodyParser.json());
 
 const descope = DescopeClient({
   projectId: process.env.DESCOPE_PROJECT_ID,
-})
-
-/*const options = {
-  key: fs.readFileSync("./key.pem"),
-  cert: fs.readFileSync("./cert.pem"),
-};*/
-
-const PORT = process.env.PORT || 5248;
-
-const userGmailTokens = new Map();
-
-/*https.createServer(options, app).listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});*/
-
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
 });
 
-//app.use('/upload', upload.single('resume'), requireAuth(['curate:resume']), AgentA)
-app.use('/', AgentB)
+const PORT = process.env.PORT || 5248;
+const AGENT_A_PORT = process.env.AGENT_A_PORT || 5249;
+
+// Health check for the main orchestrator
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    service: 'ResuMate Orchestrator',
+    agents: {
+      agentA: `http://localhost:${AGENT_A_PORT}`,
+      agentB: `http://localhost:${PORT}`
+    }
+  });
+});
+
+// Route user-facing resume processing to Agent A
+app.use('/agent-a', AgentA);
+
+// Route company research and email sending to Agent B  
+app.use('/', AgentB);
+
+// Start main server (Agent B)
+app.listen(PORT, () => {
+  console.log(`🚀 Agent B (Main Server) running on port ${PORT}`);
+  console.log(`📊 Agent A should run on port ${AGENT_A_PORT}`);
+  console.log(`🔗 Inter-agent communication secured with Descope roles`);
+});
+
+// Start Agent A on separate port
+const agentAApp = express();
+agentAApp.use(cors({ origin: ["http://localhost:3000", "http://localhost:5248"], credentials: true }));
+agentAApp.use(express.json());
+agentAApp.use(bodyParser.json());
+agentAApp.use('/', AgentA);
+
+agentAApp.listen(AGENT_A_PORT, () => {
+  console.log(`🤖 Agent A (Resume & Email Analysis) running on port ${AGENT_A_PORT}`);
+});
